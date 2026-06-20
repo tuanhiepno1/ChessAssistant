@@ -44,11 +44,9 @@ Nếu máy cũ hoặc không hỗ trợ AVX2, chọn đúng build Stockfish tư�
 
 ```powershell
 cd C:\Projects
-git clone <URL_REPOSITORY_GITHUB>
+git clone https://github.com/tuanhiepno1/ChessAssistant.git
 cd ChessAssistant
 ```
-
-Thay `<URL_REPOSITORY_GITHUB>` bằng URL repository thực tế.
 
 ### 3. Cài thư viện tự động
 
@@ -199,4 +197,3 @@ vision/        DOM, chụp màn hình và nhận diện quân
 ## Lưu ý sử dụng
 
 Ứng dụng chỉ hiển thị phân tích và gợi ý. Người dùng tự chịu trách nhiệm tuân thủ điều khoản của website, giải đấu và nền tảng cờ vua đang sử dụng.
-
