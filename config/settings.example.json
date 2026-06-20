@@ -1,0 +1,47 @@
+{
+  "engine": {
+    "stockfish_path": "C:/Tools/Stockfish/stockfish.exe",
+    "auto_tune": true,
+    "threads": 8,
+    "hash_mb": 2048,
+    "ponder": false,
+    "multipv": 1,
+    "skill_level": 20,
+    "contempt": 0,
+    "uci_options": {}
+  },
+  "analysis": {
+    "time_ms": 2500,
+    "adaptive_time_enabled": true,
+    "adaptive_min_time_ms": 700,
+    "adaptive_max_time_ms": 6000,
+    "adaptive_probe_time_ms": 300,
+    "adaptive_realtime_max_time_ms": 4200,
+    "preset": "MEDIUM",
+    "game_minutes": 10,
+    "cache_enabled": true
+  },
+  "book": {
+    "enabled": false,
+    "path": "books/lichess_2025_1000_1600.bin",
+    "prefer_book": false,
+    "verify_with_engine": true,
+    "max_eval_loss_cp": 10,
+    "verify_time_ms": 300
+  },
+  "tablebase": {
+    "enabled": false,
+    "syzygy_path": "tablebase/syzygy/3-4-5",
+    "max_pieces": 5
+  },
+  "vision": {
+    "yolo_model_path": "models/chess_piece_model.pt",
+    "confidence_threshold": 0.5,
+    "board_position": null,
+    "perspective": "white"
+  },
+  "browser": {
+    "preferred_site": "auto"
+  }
+}
+

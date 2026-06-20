@@ -1,0 +1,36 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Runtime configuration and local output
+config/settings.json
+*.log
+ui_preview.png
+
+# Build output
+build/
+dist/
+*.spec
+
+# Local diagnostic/vendor bundles
+play_chessbase_Play.js
+
+# Large optional assets: install separately as documented in README
+tablebase/syzygy/**/*.rtbw
+tablebase/syzygy/**/*.rtbz
+tablebase/syzygy/**/*.exe
+tablebase/syzygy/**/*.md5
+books/cerebellum/Cerebellum_Light_3Merge_200916/Cerebellum3Merge.bin
+
