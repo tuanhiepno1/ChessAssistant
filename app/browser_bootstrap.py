@@ -37,7 +37,10 @@ def ensure_chess_browser(timeout_seconds: float = 10.0) -> BrowserLaunchResult:
     if browser is None:
         return BrowserLaunchResult(
             False,
-            message="Không tìm thấy Cốc Cốc hoặc Google Chrome trên máy.",
+            message=(
+                "Không tìm thấy trình duyệt tương thích. Hãy cài Cốc Cốc, "
+                "Google Chrome, Microsoft Edge hoặc Brave."
+            ),
         )
 
     browser_name, executable, profile_name = browser
@@ -163,6 +166,36 @@ def _find_browser() -> tuple[str, Path, str] | None:
             "Google Chrome",
             program_files_x86 / "Google/Chrome/Application/chrome.exe",
             "ChessAssistantChrome",
+        ),
+        (
+            "Microsoft Edge",
+            program_files / "Microsoft/Edge/Application/msedge.exe",
+            "ChessAssistantEdge",
+        ),
+        (
+            "Microsoft Edge",
+            program_files_x86 / "Microsoft/Edge/Application/msedge.exe",
+            "ChessAssistantEdge",
+        ),
+        (
+            "Microsoft Edge",
+            local_app_data / "Microsoft/Edge/Application/msedge.exe",
+            "ChessAssistantEdge",
+        ),
+        (
+            "Brave",
+            local_app_data / "BraveSoftware/Brave-Browser/Application/brave.exe",
+            "ChessAssistantBrave",
+        ),
+        (
+            "Brave",
+            program_files / "BraveSoftware/Brave-Browser/Application/brave.exe",
+            "ChessAssistantBrave",
+        ),
+        (
+            "Brave",
+            program_files_x86 / "BraveSoftware/Brave-Browser/Application/brave.exe",
+            "ChessAssistantBrave",
         ),
     ]
     for browser_name, path, profile_name in candidates:

@@ -17,7 +17,7 @@
 
 - Windows 10 hoặc Windows 11 64-bit.
 - Python 3.11 trở lên, bản 64-bit.
-- Google Chrome hoặc Cốc Cốc.
+- Một trình duyệt Chromium được hỗ trợ: Cốc Cốc, Google Chrome, Microsoft Edge hoặc Brave. Windows 10/11 thường đã có sẵn Microsoft Edge.
 - Stockfish bản Windows 64-bit.
 - Khuyến nghị tối thiểu 8 GB RAM; chế độ Mạnh nhất phù hợp hơn với máy 16–32 GB RAM.
 
@@ -31,7 +31,7 @@ Cài các phần mềm sau:
 
 1. Git for Windows.
 2. Python 3.11 hoặc mới hơn. Khi cài, chọn **Add Python to PATH**.
-3. Google Chrome hoặc Cốc Cốc.
+3. Một trình duyệt được hỗ trợ. Có thể dùng Microsoft Edge có sẵn trên Windows; không bắt buộc cài Cốc Cốc hoặc Chrome.
 4. Stockfish cho Windows 64-bit từ trang chính thức của Stockfish và giải nén vào một thư mục cố định, ví dụ:
 
 ```text
@@ -81,7 +81,9 @@ Nhấp đúp:
 MoTroLyCoVua.bat
 ```
 
-Ứng dụng sẽ tự tìm Cốc Cốc trước, sau đó Google Chrome, và mở trình duyệt với cổng DevTools `9222`.
+Ứng dụng sẽ tự tìm Cốc Cốc, Google Chrome, Microsoft Edge rồi Brave, và mở trình duyệt đầu tiên tìm thấy với cổng DevTools `9222`.
+
+Trình duyệt này dùng profile riêng trong thư mục tạm của Windows để không ảnh hưởng profile cá nhân và để DevTools hoạt động ổn định. Vì vậy, lần đầu chạy trên máy mới có thể cần đăng nhập lại tài khoản Chess.com, Lichess, ChessBase hoặc ChessClub trong cửa sổ trình duyệt do ứng dụng mở. Không tự mở website bằng một cửa sổ trình duyệt thông thường khác vì cửa sổ đó không có cổng DevTools `9222`.
 
 Trong cửa sổ **Cài đặt → Stockfish**:
 
@@ -90,6 +92,22 @@ Trong cửa sổ **Cài đặt → Stockfish**:
 3. Bấm **Lưu**.
 
 File `config/settings.json` sẽ tự được tạo trên máy mới. File này chứa đường dẫn và cấu hình riêng của máy nên không được commit lên Git.
+
+### 5. Kiểm tra nhanh trước khi chơi
+
+1. Chọn **Tôi cầm Trắng** hoặc **Tôi cầm Đen** đúng với ván hiện tại.
+2. Bấm nút website cần chơi và đăng nhập trong trình duyệt do ứng dụng mở.
+3. Vào một ván, chờ dòng trạng thái báo đã đọc được bàn cờ và lượt đi.
+4. Nếu Stockfish chưa chạy, mở **Cài đặt → Stockfish**, chọn đúng file `.exe`, lưu rồi bấm **Tính lại nước tốt nhất**.
+
+## Chế độ hiển thị và live stream
+
+Nút **Overlay trên web** chuyển giữa hai cách hiển thị:
+
+- **BẬT**: đánh dấu nước tốt nhất trực tiếp trên bàn cờ website; bàn cờ trong ứng dụng được ẩn để giao diện gọn hơn.
+- **TẮT**: xóa dấu gợi ý khỏi website và hiển thị bàn cờ, mũi tên cùng chỉ dẫn trong ứng dụng. Dùng chế độ này khi live stream website để overlay không xuất hiện trên luồng phát.
+
+Lựa chọn được lưu trong `config/settings.json` và được giữ lại ở lần mở ứng dụng tiếp theo. Phần log luôn tự cuộn tới sự kiện mới nhất.
 
 ## Kiểm tra cài đặt
 
@@ -161,7 +179,8 @@ Mở **Cài đặt → Stockfish** và chọn lại đúng file `.exe`. Không d
 
 1. Đóng toàn bộ tiến trình ứng dụng và trình duyệt do ứng dụng mở.
 2. Chạy lại bằng `MoTroLyCoVua.bat`.
-3. Kiểm tra Chrome/Cốc Cốc không bị phần mềm bảo mật chặn tham số remote debugging.
+3. Kiểm tra Cốc Cốc/Chrome/Edge/Brave không bị phần mềm bảo mật chặn tham số remote debugging.
+4. Không mở đồng thời một trình duyệt khác bằng cổng `9222`; mỗi máy chỉ nên để ChessAssistant quản lý một phiên DevTools này.
 
 ### PowerShell chặn script
 

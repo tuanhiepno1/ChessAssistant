@@ -43,6 +43,7 @@ class DomBoardState:
     title: str
     turn: chess.Color | None
     turn_reliable: bool
+    turn_source: str
     active_clock_position: str | None
     black_at_bottom: bool
     site: str
@@ -279,28 +280,40 @@ class DomBoardReader:
       turnFromLastMove = occupiedLastMoveSquares[0].piece.startsWith('w') ? 'black' : 'white';
     }
   }
-  const moveSelector = location.hostname.includes('lichess.org')
-    ? 'l4x kwdb, .analyse__moves move, .moves move'
+  const firstMoveNodes = (selectors) => {
+    for (const selector of selectors) {
+      const nodes = Array.from(document.querySelectorAll(selector));
+      if (nodes.length) return nodes;
+    }
+    return [];
+  };
+  const moveNodes = location.hostname.includes('lichess.org')
+    ? firstMoveNodes(['l4x kwdb', '.analyse__moves move', '.moves move'])
     : (location.hostname.includes('chess.com')
-      ? 'vertical-move-list .node, wc-vertical-move-list .node, .move-list-row .node, .main-line-row .node, .move-text-component'
+      ? firstMoveNodes([
+          'vertical-move-list .node',
+          'wc-vertical-move-list .node',
+          '.move-list-row .node',
+          '.main-line-row .node',
+          '.move-text-component'
+        ])
       : (location.hostname.includes('play.chessclub.com')
-        ? '[data-san], .move-list .move, .moves .move, move'
-        : 'kwdb, move'));
-  const moveNodes = Array.from(document.querySelectorAll(moveSelector));
+        ? firstMoveNodes(['[data-san]', '.move-list .move', '.moves .move', 'move'])
+        : firstMoveNodes(['kwdb', 'move'])));
   const rawMoves = moveNodes
     .map((el) => (el.getAttribute?.('data-san') || el.textContent || '').trim())
     .filter((text) => text && !/^\d+\.*$/.test(text));
-  const uniqueMoves = [];
-  for (const text of rawMoves) {
-    const clean = text.replace(/\s+/g, ' ').trim();
-    if (!clean) continue;
-    if (uniqueMoves[uniqueMoves.length - 1] !== clean) uniqueMoves.push(clean);
-  }
+  // querySelectorAll already returns each DOM node once even when it matches
+  // multiple selectors. Never collapse equal adjacent SAN: O-O O-O and many
+  // repeated manoeuvres are valid consecutive moves by opposite colours.
+  const uniqueMoves = rawMoves
+    .map((text) => text.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
   // Clock markup changes often and differs substantially between the four sites.
   // Keep the selectors site-aware, but also detect the clock whose text changed
   // since the previous poll.  The latter survives renamed active/running classes.
   const clockSelector = location.hostname.includes('lichess.org')
-    ? 'rclock, .rclock, [class*="rclock"], [class*="clock"]'
+    ? 'rclock, .rclock'
     : (location.hostname.includes('chess.com')
       ? 'wc-chess-clock, .clock-component, [class*="clock"]'
       : (location.hostname.includes('play.chessbase.com')
@@ -346,21 +359,39 @@ class DomBoardReader:
     /(^|[\s_-])(running|active|turn|ticking|is2)([\s_-]|$)/.test(ancestry) &&
     !/(inactive|stopped|paused|expired)/.test(ancestry)
   );
-  const activeClock = changedPositions.length === 1
-    ? distinctClocks.find((item) => {
+  const lichessRunningClock = location.hostname.includes('lichess.org')
+    ? distinctClocks.find(({ el }) => el.classList.contains('running'))?.el || null
+    : null;
+  const chessComActiveClock = location.hostname.includes('chess.com')
+    ? document.querySelector('.clock-player-turn, .clock-component.clock-player-turn')
+    : null;
+  const chessClubActiveClock = location.hostname.includes('play.chessclub.com')
+    ? document.querySelector('[data-testid*="clock"].running, [data-testid*="clock"].active, .clock.running, .clock.active')
+    : null;
+  const activeClock = lichessRunningClock || chessComActiveClock || chessClubActiveClock || (classActive.length === 1
+    ? classActive[0].el
+    : (changedPositions.length === 1
+      ? distinctClocks.find((item) => {
         if (!boardRect) return false;
         const position = item.rect.top + item.rect.height / 2 > boardRect.top + boardRect.height / 2 ? 'bottom' : 'top';
         return position === changedPositions[0];
       })?.el || null
-    : (classActive.length === 1 ? classActive[0].el : null);
+      : null));
   const clockClasses = activeClock ? Array.from(activeClock.classList) : [];
   const clockHostClasses = activeClock && activeClock.parentElement
     ? Array.from(activeClock.parentElement.classList)
     : [];
   const clockText = [...clockClasses, ...clockHostClasses].join(' ').toLowerCase();
   let activeClockPosition = null;
-  if (clockText.includes('bottom') || clockText.includes('lclock') || clockText.includes('clock-bottom')) activeClockPosition = 'bottom';
-  if (clockText.includes('top') || clockText.includes('rclock') || clockText.includes('clock-top')) activeClockPosition = 'top';
+  if (clockText.includes('rclock-bottom') || clockText.includes('clock-bottom')) {
+    activeClockPosition = 'bottom';
+  } else if (clockText.includes('rclock-top') || clockText.includes('clock-top')) {
+    activeClockPosition = 'top';
+  } else if (clockClasses.includes('lclock') || clockHostClasses.includes('lclock')) {
+    activeClockPosition = 'bottom';
+  } else if (clockClasses.includes('rclock') || clockHostClasses.includes('rclock')) {
+    activeClockPosition = 'top';
+  }
   if (!activeClockPosition && activeClock && boardRect) {
     const clockRect = activeClock.getBoundingClientRect();
     const clockCenterY = clockRect.top + clockRect.height / 2;
@@ -446,6 +477,7 @@ class DomBoardReader:
             title=str(payload.get("title", "")),
             turn=turn,
             turn_reliable=turn_reliable,
+            turn_source=turn_source,
             active_clock_position=str(active_clock) if active_clock in {"top", "bottom"} else None,
             black_at_bottom=bool(payload.get("blackAtBottom", False)),
             site=site,
@@ -468,6 +500,22 @@ class DomBoardReader:
             expression = self._chessbase_native_overlay_script(from_square, to_square)
         else:
             expression = self._overlay_script(from_square, to_square, perspective, label)
+        self._evaluate(ws_url, expression)
+
+    def clear_best_move(self) -> None:
+        page = self._find_chess_page()
+        ws_url = page.get("webSocketDebuggerUrl")
+        if not ws_url:
+            raise DomReadError("Không tìm thấy WebSocket DevTools của thẻ cờ vua.")
+        expression = r"""
+(() => {
+  document.getElementById('chess-assistant-web-overlay')?.remove();
+  if (location.hostname.includes('play.chessbase.com')) {
+    window.glApp?.panelMgr?.getKernel?.()?.boardWin?.undoAttributes?.();
+  }
+  return {ok: true};
+})()
+"""
         self._evaluate(ws_url, expression)
 
     def _find_chess_page(self) -> dict:
@@ -665,16 +713,15 @@ class DomBoardReader:
 
     @staticmethod
     def _chessbase_native_overlay_script(from_square: str, to_square: str) -> str:
-        data = json.dumps({"from": from_square, "to": to_square})
+        data = json.dumps({
+            "from": DomBoardReader._chessbase_square_index(from_square),
+            "to": DomBoardReader._chessbase_square_index(to_square),
+        })
         return f"""
 (() => {{
   const data = {data};
-  const toIndex = (square) => {{
-    if (!/^[a-h][1-8]$/.test(square || '')) return null;
-    return (Number(square[1]) - 1) * 8 + square.charCodeAt(0) - 97;
-  }};
-  const from = toIndex(data.from);
-  const to = toIndex(data.to);
+  const from = data.from;
+  const to = data.to;
   const boardWin = window.glApp?.panelMgr?.getKernel?.()?.boardWin;
   if (!boardWin || from === null || to === null) return {{ok: false}};
 
@@ -691,6 +738,12 @@ class DomBoardReader:
   return {{ok: true}};
 }})()
 """
+
+    @staticmethod
+    def _chessbase_square_index(square: str) -> int | None:
+        if not re.fullmatch(r"[a-h][1-8]", square or ""):
+            return None
+        return (ord(square[0]) - ord("a")) * 8 + int(square[1]) - 1
 
     @staticmethod
     def _overlay_script(from_square: str, to_square: str, perspective: str, label: str) -> str:
@@ -755,15 +808,34 @@ class DomBoardReader:
     .map((el) => `${{el.className || ''}} ${{el.getAttribute?.('data-orientation') || ''}} ${{el.getAttribute?.('orientation') || ''}}`)
     .join(' ')
     .toLowerCase();
-  let blackAtBottom =
+  // ChessClub does not consistently expose an orientation class. Start from
+  // the user-selected perspective, then prefer orientation evidence from the
+  // rendered board when the site provides it.
+  let blackAtBottom = data.perspective === 'black';
+  if (
     boardText.includes('flipped') ||
     boardText.includes('orientation-black') ||
-    boardText.includes('orientation black');
+    boardText.includes('orientation black')
+  ) blackAtBottom = true;
+  if (
+    boardText.includes('orientation-white') ||
+    boardText.includes('orientation white')
+  ) blackAtBottom = false;
   try {{
     const chessBaseOrientation = window.glApp?.panelMgr?.getKernel?.()?.boardWin?.blackIsBottom;
     if (typeof chessBaseOrientation === 'boolean') blackAtBottom = chessBaseOrientation;
   }} catch (err) {{
     // Keep the DOM orientation fallback.
+  }}
+
+  // data-square is orientation-independent. Its rendered position is the
+  // strongest signal on ChessClub, where the flipped state may have no class.
+  const a1Anchor = board.querySelector?.('[data-square="a1"]');
+  if (a1Anchor) {{
+    const anchorRect = a1Anchor.getBoundingClientRect();
+    const anchorX = anchorRect.left + anchorRect.width / 2;
+    const anchorY = anchorRect.top + anchorRect.height / 2;
+    blackAtBottom = anchorX > rect.left + rect.width / 2 && anchorY < rect.top + rect.height / 2;
   }}
 
   const center = (file, rank) => {{

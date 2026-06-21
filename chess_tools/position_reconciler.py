@@ -26,6 +26,7 @@ class PositionReconciler:
         source: str = "Nhận diện",
         max_plies: int = 2,
         allow_resync: bool = False,
+        allow_piece_increase_resync: bool = False,
     ) -> ReconciledPosition:
         observed = chess.Board(FenBuilder().build(pieces, side_to_move=turn_hint))
         self._require_kings(observed, source)
@@ -38,6 +39,18 @@ class PositionReconciler:
                     accepted=True,
                     plies_advanced=0,
                     status=f"{source}: thế cờ không đổi; giữ nguyên lượt đã xác nhận.",
+                )
+
+            restarted = self._find_new_game_position(previous, observed)
+            if restarted is not None:
+                return ReconciledPosition(
+                    fen=restarted.fen(),
+                    accepted=True,
+                    plies_advanced=0,
+                    status=(
+                        f"{source}: phát hiện ván/rematch mới và dựng lại lịch sử "
+                        "từ thế cờ ban đầu."
+                    ),
                 )
 
             matched = self._find_successor(previous, observed.board_fen(), max_plies=max_plies)
@@ -73,7 +86,10 @@ class PositionReconciler:
                     ),
                 )
 
-            if len(observed.piece_map()) > len(previous.piece_map()):
+            if (
+                len(observed.piece_map()) > len(previous.piece_map())
+                and not allow_piece_increase_resync
+            ):
                 return ReconciledPosition(
                     fen=previous.fen(),
                     accepted=False,
@@ -205,6 +221,26 @@ class PositionReconciler:
         if len(matches) != 1:
             return None
         return next(iter(matches.values()))
+
+    @classmethod
+    def _find_new_game_position(
+        cls,
+        previous: chess.Board,
+        observed: chess.Board,
+    ) -> chess.Board | None:
+        """Recognize a rematch even when one or two opening plies were missed."""
+        previous_count = len(previous.piece_map())
+        observed_count = len(observed.piece_map())
+        if not previous.is_game_over() and observed_count <= previous_count:
+            return None
+        if observed_count < 31:
+            return None
+
+        initial = chess.Board()
+        if observed.board_fen() == initial.board_fen():
+            return initial
+        matched = cls._find_successor(initial, observed.board_fen(), max_plies=2)
+        return matched[0] if matched is not None else None
 
     @staticmethod
     def _infer_turn_from_delta(

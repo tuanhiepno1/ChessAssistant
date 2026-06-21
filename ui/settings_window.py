@@ -61,7 +61,7 @@ class SettingsWindow(QDialog):
         self.auto_summary = QLabel()
         self.auto_summary.setWordWrap(True)
         self.auto_summary.setStyleSheet(
-            "padding: 8px; color: #166534; background: #f0fdf4; border: 1px solid #bbf7d0;"
+            "padding: 8px; color: #bbf7d0; background: #052e16; border: 1px solid #166534;"
         )
         layout.addWidget(self.auto_tune)
         layout.addWidget(self.performance_mode)
@@ -122,8 +122,8 @@ class SettingsWindow(QDialog):
         )
         mode_note.setWordWrap(True)
         mode_note.setStyleSheet(
-            "padding: 8px; color: #1e3a8a; background: #eff6ff; "
-            "border: 1px solid #bfdbfe; border-radius: 5px;"
+            "padding: 8px; color: #bfdbfe; background: #172554; "
+            "border: 1px solid #1d4ed8; border-radius: 5px;"
         )
         form.addRow(mode_note)
         form.addRow("Nhanh nhất khi dễ", self.adaptive_min_time_ms)

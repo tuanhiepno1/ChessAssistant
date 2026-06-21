@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import chess
 
 from vision.dom_board_reader import DomBoardReader, DomUnavailableError
-from ui.main_window import RealtimeWorker
+from ui.main_window import MainWindow, RealtimeWorker
 
 
 class FakeResponse:
@@ -178,6 +178,17 @@ class DomBoardReaderTurnTests(unittest.TestCase):
 
         self.assertEqual(fen, board.fen())
 
+    def test_consecutive_equal_castling_san_is_not_collapsed(self) -> None:
+        moves = ["e4", "e5", "Nf3", "Nf6", "Bc4", "Bc5", "O-O", "O-O"]
+        board = chess.Board()
+        for san in moves:
+            board.push_san(san)
+
+        self.assertEqual(
+            DomBoardReader._moves_to_exact_fen(moves, board),
+            board.fen(),
+        )
+
     def test_lichess_san_history_is_rejected_when_dom_board_differs(self) -> None:
         observed = chess.Board()
         observed.push_san("d4")
@@ -225,6 +236,53 @@ class RealtimeWorkerSchedulingTests(unittest.TestCase):
             RealtimeWorker._should_analyze("fen-done", "fen-done", True, True)
         )
 
+    def test_unreliable_turn_uses_selected_color_after_rematch(self) -> None:
+        self.assertEqual(
+            RealtimeWorker._turn_hint(chess.WHITE, False, chess.BLACK),
+            chess.BLACK,
+        )
+
+    def test_verified_turn_can_override_selected_color(self) -> None:
+        self.assertEqual(
+            RealtimeWorker._turn_hint(chess.WHITE, True, chess.BLACK),
+            chess.WHITE,
+        )
+
+    def test_force_refresh_uses_deep_non_realtime_analysis(self) -> None:
+        manager = Mock()
+        expected = object()
+        manager.analyze_fen.return_value = expected
+        worker = RealtimeWorker(
+            config=Mock(),
+            engine_manager=manager,
+            tracker=Mock(),
+            template_recognizer=Mock(),
+            side_to_move=chess.WHITE,
+            last_fen="",
+            force_analysis=True,
+        )
+
+        result = worker._analyze(chess.STARTING_FEN)
+
+        self.assertIs(result, expected)
+        manager.analyze_fen.assert_called_once_with(
+            chess.STARTING_FEN,
+            force=True,
+            realtime=False,
+        )
+
+    def test_ui_keeps_best_move_when_polling_the_same_position(self) -> None:
+        self.assertEqual(
+            MainWindow._retained_board_move("same-fen", "same-fen", "e2e4"),
+            "e2e4",
+        )
+
+    def test_ui_drops_stale_best_move_after_position_changes(self) -> None:
+        self.assertEqual(
+            MainWindow._retained_board_move("old-fen", "new-fen", "e2e4"),
+            "",
+        )
+
 
 class ChessBaseOverlayTests(unittest.TestCase):
     def test_chessbase_overlay_uses_native_board_coordinates(self) -> None:
@@ -232,7 +290,34 @@ class ChessBaseOverlayTests(unittest.TestCase):
 
         self.assertIn("boardWin.markSquare", script)
         self.assertIn("boardWin.drawArrow", script)
-        self.assertIn("(Number(square[1]) - 1) * 8", script)
+        self.assertEqual(DomBoardReader._chessbase_square_index("a1"), 0)
+        self.assertEqual(DomBoardReader._chessbase_square_index("a8"), 7)
+        self.assertEqual(DomBoardReader._chessbase_square_index("b1"), 8)
+        self.assertEqual(DomBoardReader._chessbase_square_index("h8"), 63)
+
+
+class WebOverlayTests(unittest.TestCase):
+    def test_overlay_falls_back_to_selected_black_perspective(self) -> None:
+        script = DomBoardReader._overlay_script("e7", "e5", "black", "e5")
+
+        self.assertIn("let blackAtBottom = data.perspective === 'black'", script)
+
+    def test_overlay_detects_orientation_from_rendered_a1_square(self) -> None:
+        script = DomBoardReader._overlay_script("e7", "e5", "black", "e5")
+
+        self.assertIn("board.querySelector?.('[data-square=\"a1\"]')", script)
+        self.assertIn("anchorX > rect.left + rect.width / 2", script)
+
+    def test_clear_overlay_removes_generic_and_chessbase_marks(self) -> None:
+        reader = DomBoardReader()
+        reader._find_chess_page = Mock(return_value={"webSocketDebuggerUrl": "ws://test"})
+        reader._evaluate = Mock(return_value={"ok": True})
+
+        reader.clear_best_move()
+
+        expression = reader._evaluate.call_args.args[1]
+        self.assertIn("chess-assistant-web-overlay", expression)
+        self.assertIn("undoAttributes", expression)
 
 
 if __name__ == "__main__":

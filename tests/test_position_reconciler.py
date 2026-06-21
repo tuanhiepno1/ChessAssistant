@@ -191,6 +191,40 @@ class PositionReconcilerTests(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertEqual(result.fen, previous.fen())
 
+    def test_chessclub_can_resync_after_render_adds_missing_pieces(self) -> None:
+        previous = chess.Board("4k3/8/8/8/8/8/P7/4K3 w - - 0 1")
+        observed = chess.Board("4k3/8/8/8/8/8/PP6/4K3 w - - 0 1")
+
+        result = self.reconciler.reconcile(
+            snapshot(observed),
+            last_fen=previous.fen(),
+            turn_hint=chess.WHITE,
+            source="ChessClub",
+            allow_resync=True,
+            allow_piece_increase_resync=True,
+        )
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(chess.Board(result.fen).board_fen(), observed.board_fen())
+        self.assertEqual(chess.Board(result.fen).turn, chess.WHITE)
+
+    def test_rematch_is_detected_after_white_already_played_first_move(self) -> None:
+        previous = chess.Board("8/8/8/8/8/4k3/8/4K3 w - - 0 70")
+        observed = chess.Board()
+        observed.push_uci("e2e4")
+
+        result = self.reconciler.reconcile(
+            snapshot(observed),
+            last_fen=previous.fen(),
+            turn_hint=chess.BLACK,
+            source="ChessClub",
+        )
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.fen, observed.fen())
+        self.assertEqual(chess.Board(result.fen).turn, chess.BLACK)
+        self.assertIn("rematch", result.status)
+
 
 if __name__ == "__main__":
     unittest.main()

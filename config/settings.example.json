@@ -41,7 +41,7 @@
     "perspective": "white"
   },
   "browser": {
-    "preferred_site": "auto"
+    "preferred_site": "auto",
+    "web_overlay_enabled": true
   }
 }
-

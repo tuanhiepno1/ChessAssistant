@@ -89,7 +89,7 @@ class HardwareRecommendationDialog(QDialog):
             "ứng dụng sẽ không tự ghi đè lại khi đổi chế độ."
         )
         note.setWordWrap(True)
-        note.setStyleSheet("color: #475569;")
+        note.setStyleSheet("color: #94a3b8;")
         layout.addWidget(note)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
@@ -136,8 +136,8 @@ class HardwareRecommendationDialog(QDialog):
         )
         recommendation.setWordWrap(True)
         recommendation.setStyleSheet(
-            "padding: 7px; color: #166534; background: #f0fdf4; "
-            "border: 1px solid #bbf7d0; border-radius: 4px; font-weight: 600;"
+            "padding: 7px; color: #bbf7d0; background: #052e16; "
+            "border: 1px solid #166534; border-radius: 4px; font-weight: 600;"
         )
         description_label = QLabel(description)
         description_label.setWordWrap(True)

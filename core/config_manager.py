@@ -51,6 +51,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "browser": {
         "preferred_site": "auto",
+        "web_overlay_enabled": True,
     },
     "hardware": {
         "signature": "",

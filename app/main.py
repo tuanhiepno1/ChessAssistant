@@ -13,12 +13,14 @@ from core.hardware_profile import detect_hardware
 from engine.engine_manager import EngineManager
 from ui.hardware_recommendation_dialog import HardwareRecommendationDialog
 from ui.main_window import MainWindow
+from ui.theme import apply_dark_theme
 
 
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Trợ lý cờ vua")
     app.setOrganizationName("ChessAssistant")
+    apply_dark_theme(app)
 
     lock_path = Path(QStandardPaths.writableLocation(QStandardPaths.TempLocation)) / "ChessAssistant.lock"
     app_lock = QLockFile(str(lock_path))

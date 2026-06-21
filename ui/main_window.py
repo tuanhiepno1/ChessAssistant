@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QPlainTextEdit,
     QSpinBox,
+    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -70,7 +71,8 @@ class AnalysisBoardWidget(QWidget):
         self._best_move_uci = ""
         self._perspective = "white"
         self._board_image: QImage | None = None
-        self.setMinimumSize(280, 280)
+        self.setMinimumSize(440, 440)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
     def set_position(self, fen: str, best_move_uci: str = "") -> None:
         self._fen = fen
@@ -96,6 +98,7 @@ class AnalysisBoardWidget(QWidget):
         super().paintEvent(event)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#0b1120"))
 
         side = min(self.width(), self.height()) - 12
         if side <= 0:
@@ -104,9 +107,9 @@ class AnalysisBoardWidget(QWidget):
         top = (self.height() - side) / 2
         square = side / 8
 
-        light = QColor("#f0d9b5")
-        dark = QColor("#b58863")
-        highlight = QColor(246, 211, 101, 120)
+        light = QColor("#cbd5e1")
+        dark = QColor("#52637a")
+        highlight = QColor(74, 222, 128, 115)
 
         if self._board_image is not None and not self._board_image.isNull():
             painter.drawImage(int(left), int(top), self._board_image.scaled(
@@ -303,7 +306,11 @@ class RealtimeWorker(QObject):
                 # DomBoardReader has already combined clock position with the
                 # board's actual orientation. Do not reinterpret top/bottom as
                 # the user's selected colour here.
-                side_to_move = state.turn if state.turn is not None else self.side_to_move
+                side_to_move = self._turn_hint(
+                    state.turn,
+                    state.turn_reliable,
+                    self.side_to_move,
+                )
                 if state.exact_fen:
                     fen = state.exact_fen
                     reconciled_accepted = True
@@ -317,16 +324,28 @@ class RealtimeWorker(QObject):
                         turn_hint=side_to_move,
                         source="DOM",
                         max_plies=3,
-                        allow_resync=state.turn_reliable,
+                        allow_resync=(
+                            state.turn_reliable
+                            or state.site == "chessclub"
+                            or self.force_analysis
+                        ),
+                        allow_piece_increase_resync=(
+                            state.site == "chessclub" or self.force_analysis
+                        ),
                     )
                     fen = reconciled.fen
                     reconciled_accepted = reconciled.accepted
                     reconciled_status = reconciled.status
                 board = chess.Board(fen)
                 effective_turn = "Trắng" if board.turn == chess.WHITE else "Đen"
+                turn_source = (
+                    state.turn_source
+                    if state.turn_reliable
+                    else "màu người chơi đã chọn"
+                )
                 status = (
                     f"DOM đọc {len(state.pieces)} quân, lượt {effective_turn} "
-                    f"theo {'đồng hồ đang chạy' if state.turn_reliable else 'danh sách nước'} "
+                    f"theo {turn_source} "
                     f"({state.site}, {'Đen' if state.black_at_bottom else 'Trắng'} ở dưới, "
                     f"clock {state.active_clock_position or 'không rõ'}). "
                     f"{reconciled_status}"
@@ -335,8 +354,19 @@ class RealtimeWorker(QObject):
                     self.finished.emit(None, fen, len(state.pieces), None, None, status)
                     return
                 if board.turn != self.side_to_move:
-                    self.finished.emit(None, fen, len(state.pieces), None, None, status)
-                    return
+                    if self.force_analysis:
+                        forced_board = board.copy(stack=False)
+                        forced_board.turn = self.side_to_move
+                        if forced_board.is_valid():
+                            board = forced_board
+                            fen = board.fen()
+                            status += " Đã dùng màu người chơi làm lượt đi theo yêu cầu tính lại."
+                        else:
+                            self.finished.emit(None, fen, len(state.pieces), None, None, status)
+                            return
+                    else:
+                        self.finished.emit(None, fen, len(state.pieces), None, None, status)
+                        return
                 if not self._should_analyze(
                     fen, self.last_fen, self.has_current_analysis, self.force_analysis
                 ):
@@ -369,7 +399,14 @@ class RealtimeWorker(QObject):
                             turn_hint=(latest_state.turn if latest_state.turn is not None else self.side_to_move),
                             source="DOM sau phân tích",
                             max_plies=3,
-                            allow_resync=latest_state.turn_reliable,
+                            allow_resync=(
+                                latest_state.turn_reliable
+                                or latest_state.site == "chessclub"
+                                or self.force_analysis
+                            ),
+                            allow_piece_increase_resync=(
+                                latest_state.site == "chessclub" or self.force_analysis
+                            ),
                         )
                         latest_fen = latest.fen
                     self.finished.emit(
@@ -432,8 +469,12 @@ class RealtimeWorker(QObject):
                     )
                     return
                 if board.turn != self.side_to_move:
-                    self.finished.emit(None, fen, len(recognition.pieces), board_image, box, reconciled.status)
-                    return
+                    if self.force_analysis:
+                        board.turn = self.side_to_move
+                        fen = board.fen()
+                    else:
+                        self.finished.emit(None, fen, len(recognition.pieces), board_image, box, reconciled.status)
+                        return
                 if not self._should_analyze(
                     fen, self.last_fen, self.has_current_analysis, self.force_analysis
                 ):
@@ -470,8 +511,12 @@ class RealtimeWorker(QObject):
                 self.finished.emit(None, fen, len(detections), board_image, box, reconciled.status)
                 return
             if board.turn != self.side_to_move:
-                self.finished.emit(None, fen, len(detections), board_image, box, reconciled.status)
-                return
+                if self.force_analysis:
+                    board.turn = self.side_to_move
+                    fen = board.fen()
+                else:
+                    self.finished.emit(None, fen, len(detections), board_image, box, reconciled.status)
+                    return
             if not self._should_analyze(
                 fen, self.last_fen, self.has_current_analysis, self.force_analysis
             ):
@@ -484,7 +529,11 @@ class RealtimeWorker(QObject):
 
     def _analyze(self, fen: str) -> AnalysisResult:
         try:
-            return self.engine_manager.analyze_fen(fen, force=self.force_analysis, realtime=True)
+            return self.engine_manager.analyze_fen(
+                fen,
+                force=self.force_analysis,
+                realtime=not self.force_analysis,
+            )
         except Exception as exc:
             self.engine_manager.close()
             raise RuntimeError(f"Stockfish gặp lỗi: {exc}") from exc
@@ -497,6 +546,14 @@ class RealtimeWorker(QObject):
         force_analysis: bool,
     ) -> bool:
         return force_analysis or fen != last_fen or not has_current_analysis
+
+    @staticmethod
+    def _turn_hint(
+        detected_turn: chess.Color | None,
+        detected_reliable: bool,
+        player_color: chess.Color,
+    ) -> chess.Color:
+        return detected_turn if detected_turn is not None and detected_reliable else player_color
 
     def _capture_detected_board(self) -> tuple[BoardBox, object]:
         screenshot = ScreenCapture().capture()
@@ -530,6 +587,7 @@ class MainWindow(QMainWindow):
         self._last_realtime_fen = ""
         self._last_realtime_error = ""
         self._last_realtime_best_move = ""
+        self._last_analysis_result: AnalysisResult | None = None
         self._last_log_message = ""
         self._site_generation = 0
         self._browser_target_id = ""
@@ -554,6 +612,7 @@ class MainWindow(QMainWindow):
         root = QWidget(self)
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
+        self.root_layout = layout
 
         controls = QGroupBox("Điều khiển")
         top_bar = QGridLayout(controls)
@@ -581,17 +640,26 @@ class MainWindow(QMainWindow):
         self.open_chessclub_button = QPushButton("ChessClub")
         self.settings_button = QPushButton("⚙ Cài đặt")
         self.refresh_best_button = QPushButton("↻ Tính lại nước tốt nhất")
+        self.refresh_best_button.setToolTip(
+            "Đọc lại bàn cờ, bỏ cache và dùng thời gian phân tích sâu tối đa của chế độ hiện tại."
+        )
         self.refresh_best_button.setStyleSheet(
             "font-size: 15px; font-weight: 700; padding: 9px 14px; "
-            "background: #15803d; color: white; border: 1px solid #166534; border-radius: 7px;"
+            "background: #166534; color: #f0fdf4; border: 1px solid #22c55e; border-radius: 7px;"
+        )
+        self.web_overlay_button = QPushButton()
+        self.web_overlay_button.setCheckable(True)
+        self.web_overlay_button.setToolTip(
+            "Bật: đánh dấu nước tốt nhất trên bàn cờ website và ẩn bàn cờ trong ứng dụng.\n"
+            "Tắt: website không có dấu gợi ý; nước tốt nhất chỉ hiện trong ứng dụng, phù hợp khi live stream."
         )
         self.new_game_button.setStyleSheet(
-            "font-weight: 700; padding: 7px 12px; background: #fff7ed; "
-            "color: #9a3412; border: 1px solid #fdba74; border-radius: 6px;"
+            "font-weight: 700; padding: 7px 12px; background: #431407; "
+            "color: #fdba74; border: 1px solid #c2410c; border-radius: 6px;"
         )
         site_button_style = (
-            "font-weight: 600; padding: 7px 10px; background: #eff6ff; "
-            "color: #1d4ed8; border: 1px solid #93c5fd; border-radius: 6px;"
+            "font-weight: 600; padding: 7px 10px; background: #172554; "
+            "color: #bfdbfe; border: 1px solid #2563eb; border-radius: 6px;"
         )
         for button in (
             self.open_chesscom_button,
@@ -601,13 +669,13 @@ class MainWindow(QMainWindow):
         ):
             button.setStyleSheet(site_button_style)
         self.settings_button.setStyleSheet(
-            "padding: 7px 10px; background: #f8fafc; color: #334155; "
-            "border: 1px solid #cbd5e1; border-radius: 6px;"
+            "padding: 7px 10px; background: #1e293b; color: #cbd5e1; "
+            "border: 1px solid #475569; border-radius: 6px;"
         )
         self.profile_summary_label = QLabel("-")
         self.profile_summary_label.setStyleSheet(
-            "padding: 6px 10px; color: #1e3a8a; background: #eff6ff; "
-            "border: 1px solid #bfdbfe; border-radius: 5px; font-weight: 600;"
+            "padding: 6px 10px; color: #bfdbfe; background: #172554; "
+            "border: 1px solid #1d4ed8; border-radius: 5px; font-weight: 600;"
         )
 
         top_bar.addWidget(QLabel("Chế độ"), 0, 0)
@@ -625,7 +693,8 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(self.open_chessbase_button, 4, 0)
         top_bar.addWidget(self.open_chessclub_button, 4, 1)
         top_bar.addWidget(self.refresh_best_button, 3, 2, 2, 2)
-        top_bar.addWidget(self.profile_summary_label, 5, 0, 1, 4)
+        top_bar.addWidget(self.web_overlay_button, 5, 0, 1, 4)
+        top_bar.addWidget(self.profile_summary_label, 6, 0, 1, 4)
         top_bar.setColumnStretch(1, 1)
         layout.addWidget(controls)
 
@@ -652,21 +721,24 @@ class MainWindow(QMainWindow):
         layout.addWidget(vision_group)
         vision_group.setVisible(False)
 
-        result_group = QGroupBox("Kết quả phân tích")
-        result_layout = QVBoxLayout(result_group)
+        self.result_group = QGroupBox("Kết quả phân tích")
+        result_layout = QVBoxLayout(self.result_group)
         self.best_move_label = QLabel("-")
         self.best_move_label.setWordWrap(True)
-        self.best_move_label.setStyleSheet("font-size: 24px; font-weight: 700; color: #15803d;")
+        self.best_move_label.setStyleSheet("font-size: 24px; font-weight: 700; color: #4ade80;")
         self.best_move_label.setMinimumHeight(42)
         self.move_from_to_label = QLabel("-")
-        self.move_from_to_label.setStyleSheet("font-size: 20px; font-weight: 600; color: #111827;")
+        self.move_from_to_label.setStyleSheet("font-size: 20px; font-weight: 600; color: #e2e8f0;")
         self.evaluation_label = QLabel("-")
         self.depth_label = QLabel("-")
         self.details_label = QLabel("-")
         self.fen_status_label = QLabel("-")
         self.fen_status_label.setWordWrap(True)
 
-        form = QFormLayout()
+        self.analysis_details_panel = QWidget()
+        form = QFormLayout(self.analysis_details_panel)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setVerticalSpacing(12)
         form.addRow("NƯỚC TỐT NHẤT", self.best_move_label)
         form.addRow("CHỈ DẪN", self.move_from_to_label)
         form.addRow("Đánh giá", self.evaluation_label)
@@ -674,19 +746,25 @@ class MainWindow(QMainWindow):
         form.addRow("Chi tiết", self.details_label)
         form.addRow("Trạng thái", self.fen_status_label)
         self.board_widget = AnalysisBoardWidget()
-        result_layout.addWidget(self.board_widget, 1)
-        result_layout.addLayout(form)
+        self.result_content_layout = QHBoxLayout()
+        self.result_content_layout.setContentsMargins(0, 0, 0, 0)
+        self.result_content_layout.setSpacing(18)
+        self.result_content_layout.addWidget(self.board_widget, 3)
+        self.result_content_layout.addWidget(self.analysis_details_panel, 2)
+        result_layout.addLayout(self.result_content_layout, 1)
 
-        layout.addWidget(result_group)
+        layout.addWidget(self.result_group, 5)
 
-        log_group = QGroupBox("Hoạt động gần đây")
-        log_layout = QVBoxLayout(log_group)
+        self.log_group = QGroupBox("Hoạt động gần đây · tự động theo dõi dòng mới nhất")
+        log_layout = QVBoxLayout(self.log_group)
         self.status_output = QTextEdit()
         self.status_output.setReadOnly(True)
-        self.status_output.setMaximumHeight(120)
+        self.status_output.setMinimumHeight(180)
+        self.status_output.setMaximumHeight(280)
+        self.status_output.setStyleSheet("font-size: 13px; line-height: 1.35; padding: 6px;")
         self.status_output.setPlaceholderText("Các thay đổi quan trọng sẽ xuất hiện ở đây.")
         log_layout.addWidget(self.status_output)
-        layout.addWidget(log_group)
+        layout.addWidget(self.log_group, 2)
 
         self.profile_combo.currentIndexChanged.connect(self._apply_profile)
         self.time_spin.valueChanged.connect(self._set_time)
@@ -699,6 +777,7 @@ class MainWindow(QMainWindow):
         self.open_chessclub_button.clicked.connect(self._open_chessclub)
         self.settings_button.clicked.connect(self._open_settings)
         self.refresh_best_button.clicked.connect(self._refresh_best_move)
+        self.web_overlay_button.toggled.connect(self._set_web_overlay_enabled)
         self.calibrate_button.clicked.connect(self._calibrate_board)
         self.capture_button.clicked.connect(self._capture_board)
         self.screen_fen_button.clicked.connect(self._build_fen_from_screen)
@@ -723,7 +802,67 @@ class MainWindow(QMainWindow):
         self.side_combo.setCurrentIndex(max(index, 0))
         self.side_combo.blockSignals(False)
         self.board_widget.set_perspective(str(self.side_combo.currentData()))
+        self.web_overlay_button.blockSignals(True)
+        self.web_overlay_button.setChecked(
+            bool(self.config.get("browser.web_overlay_enabled", True))
+        )
+        self.web_overlay_button.blockSignals(False)
+        self._apply_web_overlay_mode()
         self._refresh_board_position_label()
+
+    @Slot(bool)
+    def _set_web_overlay_enabled(self, enabled: bool) -> None:
+        self.config.set("browser.web_overlay_enabled", enabled)
+        self.config.save()
+        self._apply_web_overlay_mode()
+        if enabled:
+            if self._last_analysis_result is not None:
+                self._show_move_on_web_board(self._last_analysis_result)
+            self._log("Overlay web đã bật: bàn cờ ứng dụng được ẩn và gợi ý sẽ hiện trên website.")
+        else:
+            self._clear_move_from_web_board()
+            self._log("Overlay web đã tắt: website không còn gợi ý; nước tốt nhất chỉ hiện trong ứng dụng.")
+
+    def _apply_web_overlay_mode(self) -> None:
+        enabled = self.web_overlay_button.isChecked()
+        if enabled:
+            self.board_widget.setMinimumSize(0, 0)
+        else:
+            self.board_widget.setMinimumSize(460, 460)
+        self.board_widget.setVisible(not enabled)
+        self.analysis_details_panel.setMinimumWidth(0 if enabled else 300)
+        self.analysis_details_panel.setMaximumWidth(16777215 if enabled else 360)
+        self.result_content_layout.setStretch(0, 0 if enabled else 3)
+        self.result_content_layout.setStretch(1, 1 if enabled else 2)
+        self.root_layout.invalidate()
+        self.centralWidget().updateGeometry()
+        self.updateGeometry()
+        if enabled:
+            self.web_overlay_button.setText("Overlay trên web: BẬT · Bàn cờ UI đang ẩn")
+            self.web_overlay_button.setStyleSheet(
+                "font-weight: 700; padding: 8px 12px; background: #14532d; "
+                "color: #dcfce7; border: 1px solid #22c55e; border-radius: 6px;"
+            )
+        else:
+            self.web_overlay_button.setText("Overlay trên web: TẮT · Chỉ hiện trong UI (an toàn live stream)")
+            self.web_overlay_button.setStyleSheet(
+                "font-weight: 700; padding: 8px 12px; background: #7f1d1d; "
+                "color: #fee2e2; border: 1px solid #ef4444; border-radius: 6px;"
+            )
+        QTimer.singleShot(0, self._resize_for_overlay_mode)
+
+    def _resize_for_overlay_mode(self) -> None:
+        if self.isMaximized() or self.isFullScreen():
+            return
+        available = self.screen().availableGeometry()
+        if self.web_overlay_button.isChecked():
+            desired_width, desired_height = 880, 760
+        else:
+            desired_width, desired_height = 980, 940
+        self.resize(
+            min(desired_width, available.width()),
+            min(desired_height, available.height()),
+        )
 
     @Slot(int)
     def _apply_profile(self, _index: int) -> None:
@@ -810,6 +949,7 @@ class MainWindow(QMainWindow):
         self._last_realtime_fen = ""
         self._last_realtime_error = ""
         self._last_realtime_best_move = ""
+        self._last_analysis_result = None
         self._force_realtime_refresh = False
         self._refresh_in_progress = False
         self._board_seen_logged = False
@@ -1051,18 +1191,26 @@ class MainWindow(QMainWindow):
         self._last_realtime_error = ""
         self._last_realtime_fen = fen
         if result is None:
-            if previous_fen and fen != previous_fen:
+            position_changed = bool(previous_fen and fen != previous_fen)
+            if position_changed:
                 self._clear_best_move_display()
                 if "tự đồng bộ lại" in status:
                     self._log("Đã khôi phục trạng thái ván từ bàn cờ hiện tại.")
             if self._refresh_in_progress:
                 self._log(self._no_analysis_message(fen, status))
+            retained_move = self._retained_board_move(
+                previous_fen,
+                fen,
+                self.board_widget.best_move_uci,
+            )
             if board_image is None:
-                self.board_widget.set_position(fen)
-                self.details_label.setText("DOM · đang theo dõi")
+                self.board_widget.set_position(fen, retained_move)
             else:
-                self.board_widget.set_captured_position(fen, board_image)
-                self.details_label.setText("Hình ảnh · đang theo dõi")
+                self.board_widget.set_captured_position(fen, board_image, retained_move)
+            if not retained_move:
+                self.details_label.setText(
+                    "DOM · đang theo dõi" if board_image is None else "Hình ảnh · đang theo dõi"
+                )
             return
 
         self._render_analysis_result(result, board_image)
@@ -1086,6 +1234,11 @@ class MainWindow(QMainWindow):
         sender = self.sender()
         generation = getattr(sender, "generation", self._site_generation)
         return generation != self._site_generation
+
+    @staticmethod
+    def _retained_board_move(previous_fen: str, current_fen: str, current_move: str) -> str:
+        """Keep the visible hint while polling the same position without re-analysis."""
+        return current_move if previous_fen and previous_fen == current_fen else ""
 
     @Slot()
     def _reset_realtime_worker(self) -> None:
@@ -1134,6 +1287,7 @@ class MainWindow(QMainWindow):
         self.board_position_label.setText(f"x={box.x}, y={box.y}, kích thước={box.size}")
 
     def _render_analysis_result(self, result: AnalysisResult, board_image: object | None = None) -> None:
+        self._last_analysis_result = result
         self.best_move_label.setText(self._describe_best_move(result))
         self.move_from_to_label.setText(self._from_to_text(result.best_move_uci))
         self.evaluation_label.setText(result.evaluation)
@@ -1160,6 +1314,7 @@ class MainWindow(QMainWindow):
         self.depth_label.setText("-")
         self.details_label.setText("-")
         self._last_realtime_best_move = ""
+        self._last_analysis_result = None
 
     def _no_analysis_message(self, fen: str, status: str) -> str:
         try:
@@ -1187,6 +1342,8 @@ class MainWindow(QMainWindow):
         }.get(source, source)
 
     def _show_move_on_web_board(self, result: AnalysisResult) -> None:
+        if not self.web_overlay_button.isChecked():
+            return
         try:
             DomBoardReader(
                 preferred_site=str(self.config.get("browser.preferred_site", "auto")),
@@ -1196,6 +1353,15 @@ class MainWindow(QMainWindow):
                 perspective=str(self.side_combo.currentData()),
                 label=self._describe_best_move(result),
             )
+        except Exception:
+            return
+
+    def _clear_move_from_web_board(self) -> None:
+        try:
+            DomBoardReader(
+                preferred_site=str(self.config.get("browser.preferred_site", "auto")),
+                target_id=self._browser_target_id,
+            ).clear_best_move()
         except Exception:
             return
 
@@ -1252,3 +1418,5 @@ class MainWindow(QMainWindow):
             return
         self._last_log_message = message
         self.status_output.append(message)
+        scrollbar = self.status_output.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
