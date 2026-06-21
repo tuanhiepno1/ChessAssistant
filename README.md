@@ -109,6 +109,8 @@ Nút **Overlay trên web** chuyển giữa hai cách hiển thị:
 
 Lựa chọn được lưu trong `config/settings.json` và được giữ lại ở lần mở ứng dụng tiếp theo. Phần log luôn tự cuộn tới sự kiện mới nhất.
 
+Nút **Bullet 1′** là preset thời gian nhanh: bật để tắt Thời gian thông minh và dùng cố định `400 ms/nước`; tắt để trở về `1000 ms/nước`. Nếu bật lại Thời gian thông minh hoặc chỉnh tay sang giá trị khác, trạng thái Bullet sẽ tự tắt.
+
 ## Kiểm tra cài đặt
 
 Chạy toàn bộ test:

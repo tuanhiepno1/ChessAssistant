@@ -630,6 +630,15 @@ class MainWindow(QMainWindow):
             "Tự tăng thời gian cho thế khó và giảm thời gian cho thế dễ. "
             "Khi bật, thời gian cố định bên cạnh sẽ được bỏ qua."
         )
+        self.bullet_time_button = QPushButton("⚡ Bullet 1′ · 400 ms")
+        self.bullet_time_button.setCheckable(True)
+        self.bullet_time_button.setToolTip(
+            "Áp dụng nhanh thời gian cố định 400 ms mỗi nước và tắt Thời gian thông minh."
+        )
+        self.bullet_time_button.setStyleSheet(
+            "font-weight: 700; padding: 6px 10px; background: #78350f; "
+            "color: #fef3c7; border: 1px solid #f59e0b; border-radius: 6px;"
+        )
         self.side_combo = QComboBox()
         self.side_combo.addItem("Tôi cầm Trắng", "white")
         self.side_combo.addItem("Tôi cầm Đen", "black")
@@ -684,6 +693,7 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(self.time_label, 0, 2)
         top_bar.addWidget(self.time_spin, 0, 3)
         top_bar.addWidget(self.adaptive_time_checkbox, 1, 0, 1, 2)
+        top_bar.addWidget(self.bullet_time_button, 1, 2, 1, 2)
         top_bar.addWidget(QLabel("Bên chơi"), 2, 0)
         top_bar.addWidget(self.side_combo, 2, 1)
         top_bar.addWidget(self.new_game_button, 2, 2)
@@ -769,6 +779,7 @@ class MainWindow(QMainWindow):
         self.profile_combo.currentIndexChanged.connect(self._apply_profile)
         self.time_spin.valueChanged.connect(self._set_time)
         self.adaptive_time_checkbox.toggled.connect(self._set_adaptive_time)
+        self.bullet_time_button.toggled.connect(self._toggle_bullet_time)
         self.side_combo.currentIndexChanged.connect(self._set_side)
         self.new_game_button.clicked.connect(self._new_game)
         self.open_chesscom_button.clicked.connect(self._open_chesscom)
@@ -794,6 +805,12 @@ class MainWindow(QMainWindow):
             bool(self.config.get("analysis.adaptive_time_enabled", True))
         )
         self.adaptive_time_checkbox.blockSignals(False)
+        self.bullet_time_button.blockSignals(True)
+        self.bullet_time_button.setChecked(
+            not self.adaptive_time_checkbox.isChecked() and self.time_spin.value() == 400
+        )
+        self.bullet_time_button.blockSignals(False)
+        self._sync_bullet_button_style()
         self._sync_time_controls()
         self._refresh_profile_summary()
         perspective = str(self.config.get("vision.perspective", "white"))
@@ -871,6 +888,7 @@ class MainWindow(QMainWindow):
         self.time_spin.blockSignals(True)
         self.time_spin.setValue(int(self.config.get("analysis.time_ms", 1000)))
         self.time_spin.blockSignals(False)
+        self._sync_bullet_state_from_controls()
         self._sync_time_controls()
         self._refresh_profile_summary()
         self.engine_manager.clear_cache()
@@ -884,6 +902,7 @@ class MainWindow(QMainWindow):
             self.config.set(f"profiles.{profile}.time_ms", value)
         self.config.save()
         self.engine_manager.clear_cache()
+        self._sync_bullet_state_from_controls()
         self._refresh_profile_summary()
 
     @Slot(bool)
@@ -891,6 +910,7 @@ class MainWindow(QMainWindow):
         self.config.set("analysis.adaptive_time_enabled", enabled)
         self.config.save()
         self.engine_manager.clear_cache()
+        self._sync_bullet_state_from_controls()
         self._sync_time_controls()
         self._refresh_profile_summary()
         if enabled:
@@ -899,6 +919,51 @@ class MainWindow(QMainWindow):
             self._log(
                 f"Phân tích cố định: Stockfish dùng {self.time_spin.value() / 1000:.1f} giây mỗi nước."
             )
+
+    @Slot(bool)
+    def _toggle_bullet_time(self, enabled: bool) -> None:
+        time_ms = 400 if enabled else 1000
+        self.adaptive_time_checkbox.blockSignals(True)
+        self.time_spin.blockSignals(True)
+        self.adaptive_time_checkbox.setChecked(False)
+        self.time_spin.setValue(time_ms)
+        self.adaptive_time_checkbox.blockSignals(False)
+        self.time_spin.blockSignals(False)
+
+        profile = str(self.profile_combo.currentData())
+        self.config.set("analysis.adaptive_time_enabled", False)
+        self.config.set("analysis.time_ms", time_ms)
+        if profile in {"WEAK", "MEDIUM", "STRONG"}:
+            self.config.set(f"profiles.{profile}.time_ms", time_ms)
+        self.config.save()
+        self.engine_manager.clear_cache()
+        self._sync_time_controls()
+        self._sync_bullet_button_style()
+        self._refresh_profile_summary()
+        if enabled:
+            self._log("Đã bật preset Bullet 1 phút: cố định 400 ms mỗi nước.")
+        else:
+            self._log("Đã tắt preset Bullet: trở về cố định 1000 ms mỗi nước.")
+
+    def _sync_bullet_button_style(self) -> None:
+        if self.bullet_time_button.isChecked():
+            self.bullet_time_button.setText("⚡ Bullet 1′: BẬT · 400 ms")
+            background, border, color = "#92400e", "#fbbf24", "#fffbeb"
+        else:
+            self.bullet_time_button.setText("⚡ Bullet 1′: TẮT · Bật 400 ms")
+            background, border, color = "#3f3f46", "#71717a", "#e4e4e7"
+        self.bullet_time_button.setStyleSheet(
+            f"font-weight: 700; padding: 6px 10px; background: {background}; "
+            f"color: {color}; border: 1px solid {border}; border-radius: 6px;"
+        )
+
+    def _sync_bullet_state_from_controls(self) -> None:
+        self.bullet_time_button.blockSignals(True)
+        self.bullet_time_button.setChecked(
+            not self.adaptive_time_checkbox.isChecked() and self.time_spin.value() == 400
+        )
+        self.bullet_time_button.blockSignals(False)
+        self._sync_bullet_button_style()
 
     def _sync_time_controls(self) -> None:
         adaptive = self.adaptive_time_checkbox.isChecked()
