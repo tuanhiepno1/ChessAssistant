@@ -60,6 +60,54 @@ class PositionReconcilerTests(unittest.TestCase):
         self.assertEqual(reconciled.turn, chess.WHITE)
         self.assertEqual(reconciled.ep_square, chess.D6)
 
+    def test_midgame_vision_initialization_preserves_black_kingside_castling(self) -> None:
+        initial_snapshot = chess.Board("r3k2r/ppp2ppp/2npbn2/3Np3/2B1P3/5N2/PPP2PPP/R3K2R b KQkq - 0 8")
+        initialized = self.reconciler.reconcile(
+            snapshot(initial_snapshot),
+            turn_hint=chess.BLACK,
+            source="YOLO",
+        )
+
+        tracked = chess.Board(initialized.fen)
+        self.assertTrue(tracked.has_kingside_castling_rights(chess.BLACK))
+        castled = tracked.copy()
+        castled.push_uci("e8g8")
+
+        result = self.reconciler.reconcile(
+            snapshot(castled),
+            last_fen=tracked.fen(),
+            turn_hint=chess.BLACK,
+            source="YOLO",
+        )
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.plies_advanced, 1)
+        self.assertEqual(chess.Board(result.fen).turn, chess.WHITE)
+
+    def test_midgame_vision_initialization_preserves_white_queenside_castling(self) -> None:
+        initial_snapshot = chess.Board("r3k2r/ppp2ppp/2npbn2/3Np3/2B1P3/5N2/PPP2PPP/R3K2R w KQkq - 0 8")
+        initialized = self.reconciler.reconcile(
+            snapshot(initial_snapshot),
+            turn_hint=chess.WHITE,
+            source="YOLO",
+        )
+
+        tracked = chess.Board(initialized.fen)
+        self.assertTrue(tracked.has_queenside_castling_rights(chess.WHITE))
+        castled = tracked.copy()
+        castled.push_uci("e1c1")
+
+        result = self.reconciler.reconcile(
+            snapshot(castled),
+            last_fen=tracked.fen(),
+            turn_hint=chess.WHITE,
+            source="YOLO",
+        )
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.plies_advanced, 1)
+        self.assertEqual(chess.Board(result.fen).turn, chess.BLACK)
+
     def test_two_ply_transition_recovers_a_missed_scan(self) -> None:
         previous = chess.Board()
         observed = previous.copy()
@@ -144,6 +192,27 @@ class PositionReconcilerTests(unittest.TestCase):
         self.assertTrue(result.accepted)
         self.assertEqual(result.plies_advanced, -1)
         self.assertEqual(chess.Board(result.fen).turn, chess.WHITE)
+
+    def test_takeback_resync_uses_trusted_dom_turn_instead_of_reverse_delta(self) -> None:
+        before_black_move = chess.Board()
+        before_black_move.push_uci("e2e4")
+        after_black_move = before_black_move.copy()
+        after_black_move.push_uci("e7e5")
+
+        result = self.reconciler.reconcile(
+            snapshot(before_black_move),
+            last_fen=after_black_move.fen(),
+            turn_hint=chess.BLACK,
+            source="DOM Lichess sau takeback",
+            allow_resync=True,
+            trusted_turn_hint=True,
+        )
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.plies_advanced, -1)
+        restored = chess.Board(result.fen)
+        self.assertEqual(restored.board_fen(), before_black_move.board_fen())
+        self.assertEqual(restored.turn, chess.BLACK)
 
     def test_delta_turn_inference_supports_capture(self) -> None:
         previous = chess.Board("4k3/8/8/3p4/4P3/8/8/4K3 b - - 0 1")

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import time
 import unittest
+from unittest.mock import PropertyMock, patch
+
+import chess
 
 from engine.stockfish import UciEngine
 
@@ -21,6 +24,30 @@ class FakeProcess:
 
 
 class StockfishTimeoutTests(unittest.TestCase):
+    def test_stop_interrupts_active_search(self) -> None:
+        engine = UciEngine("unused")
+
+        with (
+            patch.object(UciEngine, "is_running", new_callable=PropertyMock, return_value=True),
+            patch.object(engine, "_send") as send,
+        ):
+            engine.stop()
+
+        send.assert_called_once_with("stop")
+
+    def test_analysis_uses_go_movetime_command(self) -> None:
+        engine = UciEngine("unused")
+        commands: list[str] = []
+
+        with (
+            patch.object(engine, "start"),
+            patch.object(engine, "_send", side_effect=commands.append),
+            patch.object(engine, "_read_line", return_value="bestmove e2e4"),
+        ):
+            engine.analyze(chess.Board(), time_ms=321, multipv=1)
+
+        self.assertEqual(commands[-1], "go movetime 321")
+
     def test_read_timeout_aborts_engine_instead_of_blocking_forever(self) -> None:
         engine = UciEngine("unused")
         process = FakeProcess()

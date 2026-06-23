@@ -30,6 +30,7 @@ class EngineManager:
     def __init__(self, config: ConfigManager) -> None:
         self.config = config
         self._engine: StockfishEngine | None = None
+        self._opening_manager = OpeningManager()
         self._configured_options: tuple[tuple[str, str], ...] | None = None
         self._cache: dict[tuple[Any, ...], AnalysisResult] = {}
         self._lock = threading.Lock()
@@ -48,7 +49,7 @@ class EngineManager:
 
     def _ensure_engine(self, engine_config: EngineConfig) -> StockfishEngine:
         if self._engine is None or self._engine.path != engine_config.path:
-            self.close()
+            self._close_engine()
             self._engine = StockfishEngine(engine_config.path)
 
         options: dict[str, Any] = {
@@ -70,10 +71,20 @@ class EngineManager:
             self._configured_options = option_signature
         return self._engine
 
-    def analyze_fen(self, fen: str, force: bool = False, realtime: bool = False) -> AnalysisResult:
+    def analyze_fen(
+        self,
+        fen: str,
+        force: bool = False,
+        realtime: bool = False,
+        multipv_override: int | None = None,
+    ) -> AnalysisResult:
         with self._lock:
             board = chess.Board(fen)
             engine_config = self.load_config()
+            if multipv_override is not None:
+                engine_config = replace(engine_config, multipv=max(1, int(multipv_override)))
+            elif realtime:
+                engine_config = replace(engine_config, multipv=1)
             time_ms = int(self.config.get("analysis.time_ms", 1000))
             cache_key = self._cache_key(board, time_ms, engine_config, realtime=realtime)
 
@@ -98,7 +109,9 @@ class EngineManager:
             if tablebase_result is not None:
                 return tablebase_result
 
-            book_result = self._try_opening_book(board)
+            # A single book entry cannot satisfy a request for several choices.
+            # In that mode, let the engine rank all candidates consistently.
+            book_result = None if engine_config.multipv > 1 else self._try_opening_book(board)
             if book_result is not None:
                 if book_result.source == "engine_book_check":
                     self._cache[cache_key] = book_result
@@ -125,7 +138,7 @@ class EngineManager:
                     self._cache[cache_key] = result
                     return result
                 except Exception:
-                    self.close()
+                    self._close_engine()
                     if attempt + 1 < attempts:
                         continue
                     raise
@@ -154,7 +167,7 @@ class EngineManager:
             return lines, int((time.perf_counter() - started) * 1000)
 
         started = time.perf_counter()
-        probe_multipv = min(max(engine_config.multipv, 3), legal_moves)
+        probe_multipv = 1 if realtime else min(max(engine_config.multipv, 3), legal_moves)
         probe_config = replace(engine_config, multipv=probe_multipv)
         engine = self._ensure_engine(probe_config)
         probe_lines = engine.analyze(board, time_ms=probe_ms, multipv=probe_multipv)
@@ -265,6 +278,7 @@ class EngineManager:
                     tbhits=info.get("tbhits"),
                     hashfull=info.get("hashfull"),
                     pv=[m.uci() for m in pv],
+                    score_cp=info.get("score_cp"),
                 )
             )
 
@@ -287,14 +301,14 @@ class EngineManager:
         )
 
     def _try_opening_book(self, board: chess.Board) -> AnalysisResult | None:
-        manager = OpeningManager(
+        self._opening_manager.configure(
             enabled=bool(self.config.get("book.enabled", False)),
             path=str(self.config.get("book.path", "")),
             prefer_book=bool(self.config.get("book.prefer_book", True)),
         )
-        if not manager.prefer_book:
+        if not self._opening_manager.prefer_book:
             return None
-        moves = manager.find_moves(board)
+        moves = self._opening_manager.find_moves(board)
         if not moves:
             return None
         move = moves[0]
@@ -389,9 +403,30 @@ class EngineManager:
                 try:
                     self._engine.new_game()
                 except Exception:
-                    self.close()
+                    self._close_engine()
 
     def close(self) -> None:
+        self._close_engine()
+        self._opening_manager.close()
+
+    def close_engine(self) -> None:
+        self._close_engine()
+
+    def cancel_analysis(self) -> None:
+        """Interrupt the current UCI search without waiting for the manager lock."""
+        engine = self._engine
+        if engine is not None:
+            engine.stop()
+
+    def refresh_opening_book(self) -> None:
+        with self._lock:
+            self._opening_manager.configure(
+                enabled=bool(self.config.get("book.enabled", False)),
+                path=str(self.config.get("book.path", "")),
+                prefer_book=bool(self.config.get("book.prefer_book", True)),
+            )
+
+    def _close_engine(self) -> None:
         if self._engine is not None:
             self._engine.quit()
             self._engine = None

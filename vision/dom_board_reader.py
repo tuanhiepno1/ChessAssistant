@@ -86,23 +86,44 @@ class DomBoardReader:
 
   const findBoard = () => {
     const cached = window.__chessAssistantMainBoard;
-    if (cached && cached.isConnected) {
-      const rect = cached.getBoundingClientRect();
-      if (rect.width > 250 && rect.height > 250 && Math.abs(rect.width - rect.height) < rect.width * 0.15) {
-        return cached;
-      }
-    }
     const selector = location.hostname.includes('lichess.org')
-      ? 'cg-board'
+      ? 'main.round cg-board, main.analyse cg-board, main.study cg-board, cg-board'
       : (location.hostname.includes('play.chessbase.com')
         ? '#boardRoot0 canvas, .boardRoot canvas, .boardHolder canvas'
         : 'wc-chess-board, chess-board, cg-board, .cg-wrap, .board, .chess-board, #board-single, [data-boardid], #boardRoot0 canvas, .boardRoot canvas, .boardHolder canvas');
+    const contextText = (el) => {
+      const nodes = [];
+      let node = el;
+      for (let depth = 0; node && depth < 6; depth++, node = node.parentElement) nodes.push(node);
+      return nodes
+        .map((item) => `${item.tagName || ''} ${item.id || ''} ${item.className || ''} ${item.getAttribute?.('data-testid') || ''}`)
+        .join(' ')
+        .toLowerCase();
+    };
+    const scoreBoard = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      const side = Math.min(rect.width, rect.height);
+      if (
+        side < 140 ||
+        Math.abs(rect.width - rect.height) > side * 0.18 ||
+        style.display === 'none' ||
+        style.visibility === 'hidden'
+      ) return null;
+      const context = contextText(el);
+      let score = side * side;
+      if (el === cached) score += 50000;
+      if (/\b(round|analyse|analysis|game|live|board-layout|board-main)\b/.test(context)) score += 500000;
+      if (/\b(mini|mini-board|miniboard|thumbnail|preview|advert|advertisement|promo)\b/.test(context)) score -= 1000000;
+      if (el.matches?.('wc-chess-board, chess-board, cg-board, #board-single, #boardRoot0 canvas')) score += 100000;
+      return { el, rect, score };
+    };
     const candidates = Array.from(document.querySelectorAll(selector))
-      .map((el) => ({ el, rect: el.getBoundingClientRect() }))
-      .filter(({ rect }) => rect.width > 250 && Math.abs(rect.width - rect.height) < rect.width * 0.15)
+      .map(scoreBoard)
+      .filter(Boolean)
       // Piece count must not affect selection: captures would otherwise make
       // the reader jump to a fuller mini-board during the game.
-      .sort((a, b) => (b.rect.width * b.rect.height) - (a.rect.width * a.rect.height));
+      .sort((a, b) => b.score - a.score);
     if (candidates.length) {
       window.__chessAssistantMainBoard = candidates[0].el;
       return candidates[0].el;
@@ -112,7 +133,7 @@ class DomBoardReader:
     let node = piece.parentElement;
     while (node && node !== document.body) {
       const rect = node.getBoundingClientRect();
-      if (rect.width > 250 && Math.abs(rect.width - rect.height) < rect.width * 0.12) {
+      if (rect.width > 140 && Math.abs(rect.width - rect.height) < rect.width * 0.12) {
         window.__chessAssistantMainBoard = node;
         return node;
       }
@@ -163,7 +184,10 @@ class DomBoardReader:
     return { file: col + 1, rank: 8 - row };
   };
 
-  const chessComPieces = Array.from(document.querySelectorAll('.piece')).map((el) => {
+  const chessComSource = boardEl
+    ? Array.from(boardEl.querySelectorAll('.piece'))
+    : Array.from(document.querySelectorAll('.piece'));
+  const chessComPieces = chessComSource.map((el) => {
     const classes = Array.from(el.classList);
     const piece = pieceCode(classes);
     const square = classes.find((name) => /^square-\d\d$/.test(name));
@@ -487,19 +511,27 @@ class DomBoardReader:
         )
 
     def show_best_move(self, move_uci: str, perspective: str, label: str) -> None:
-        if len(move_uci) < 4:
+        self.show_moves(
+            [{"uci": move_uci, "label": label, "score": "", "rank": 1, "color": "#4ade80"}],
+            perspective,
+        )
+
+    def show_moves(self, moves: list[dict[str, object]], perspective: str) -> None:
+        valid_moves = [move for move in moves[:4] if len(str(move.get("uci", ""))) >= 4]
+        if not valid_moves:
             return
         page = self._find_chess_page()
         ws_url = page.get("webSocketDebuggerUrl")
         if not ws_url:
             raise DomReadError("Không tìm thấy WebSocket DevTools của thẻ cờ vua.")
 
-        from_square = move_uci[:2]
-        to_square = move_uci[2:4]
+        first_uci = str(valid_moves[0]["uci"])
+        from_square = first_uci[:2]
+        to_square = first_uci[2:4]
         if "play.chessbase.com" in str(page.get("url", "")).lower():
             expression = self._chessbase_native_overlay_script(from_square, to_square)
         else:
-            expression = self._overlay_script(from_square, to_square, perspective, label)
+            expression = self._moves_overlay_script(valid_moves, perspective)
         self._evaluate(ws_url, expression)
 
     def clear_best_move(self) -> None:
@@ -509,6 +541,7 @@ class DomBoardReader:
             raise DomReadError("Không tìm thấy WebSocket DevTools của thẻ cờ vua.")
         expression = r"""
 (() => {
+  window.__chessAssistantOverlayCleanup?.();
   document.getElementById('chess-assistant-web-overlay')?.remove();
   if (location.hostname.includes('play.chessbase.com')) {
     window.glApp?.panelMgr?.getKernel?.()?.boardWin?.undoAttributes?.();
@@ -585,9 +618,9 @@ class DomBoardReader:
                     # Once the user explicitly chooses a site, never let an
                     # older tab from another provider win by tab-order score.
                     return max(matching, key=lambda item: item[0])[2]
-                raise DomUnavailableError(
-                    f"Đang chờ tab {preferred} tải xong; không dùng tạm bàn cờ từ website khác."
-                )
+                # A remembered preference must not force image recognition
+                # when another supported chess tab is already available.
+                return max(candidates, key=lambda item: item[0])[2]
             return max(candidates, key=lambda item: item[0])[2]
         raise DomUnavailableError(
             "Chưa tìm thấy trang cờ vua. Ứng dụng đang chờ trình duyệt tải xong."
@@ -653,7 +686,9 @@ class DomBoardReader:
                 continue
             for token in text.split():
                 token = re.sub(r"^\d+\.(?:\.\.)?", "", token).strip()
-                token = re.sub(r"[!?]+$", "", token)
+                # Lichess can render symbolic NAGs as Unicode suffixes. Some
+                # fonts expose ?! as the observed "½?" sequence.
+                token = re.sub(r"[!?‼⁇⁉⁈½□⟳]+$", "", token)
                 if not token or token.startswith("$") or token in {
                     "...", "1-0", "0-1", "1/2-1/2", "*",
                 }:
@@ -747,37 +782,66 @@ class DomBoardReader:
 
     @staticmethod
     def _overlay_script(from_square: str, to_square: str, perspective: str, label: str) -> str:
-        payload = {
-            "from": from_square,
-            "to": to_square,
-            "perspective": perspective,
-            "label": label,
-        }
-        data = json.dumps(payload)
+        return DomBoardReader._moves_overlay_script(
+            [{"uci": from_square + to_square, "label": label, "score": "", "rank": 1, "color": "#4ade80"}],
+            perspective,
+        )
+
+    @staticmethod
+    def _moves_overlay_script(moves: list[dict[str, object]], perspective: str) -> str:
+        payload = {"moves": moves[:4], "perspective": perspective}
+        data = json.dumps(payload, ensure_ascii=False)
         return f"""
 (() => {{
   const data = {data};
   const files = {{a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8}};
   const parseSquare = (sq) => [files[sq[0]], Number(sq[1])];
-  const [fromFile, fromRank] = parseSquare(data.from);
-  const [toFile, toRank] = parseSquare(data.to);
-  if (!fromFile || !toFile || !fromRank || !toRank) return {{ok: false}};
+  const moves = data.moves.map((move, index) => {{
+    const uci = String(move.uci || '');
+    const [fromFile, fromRank] = parseSquare(uci.slice(0, 2));
+    const [toFile, toRank] = parseSquare(uci.slice(2, 4));
+    return {{...move, rank: Number(move.rank || index + 1), fromFile, fromRank, toFile, toRank}};
+  }}).filter((move) => move.fromFile && move.toFile && move.fromRank && move.toRank);
+  if (!moves.length) return {{ok: false}};
 
   const findBoard = () => {{
     const cached = window.__chessAssistantMainBoard;
-    if (cached && cached.isConnected) {{
-      const rect = cached.getBoundingClientRect();
-      if (rect.width > 250 && rect.height > 250 && Math.abs(rect.width - rect.height) < rect.width * 0.15) return cached;
-    }}
     const selector = location.hostname.includes('lichess.org')
-      ? 'cg-board'
+      ? 'main.round cg-board, main.analyse cg-board, main.study cg-board, cg-board'
       : (location.hostname.includes('play.chessbase.com')
         ? '#boardRoot0 canvas, .boardRoot canvas, .boardHolder canvas'
         : 'wc-chess-board, chess-board, cg-board, .cg-wrap, .board, .chess-board, #board-single, [data-boardid], #boardRoot0 canvas, .boardRoot canvas, .boardHolder canvas');
+    const contextText = (el) => {{
+      const nodes = [];
+      let node = el;
+      for (let depth = 0; node && depth < 6; depth++, node = node.parentElement) nodes.push(node);
+      return nodes
+        .map((item) => `${{item.tagName || ''}} ${{item.id || ''}} ${{item.className || ''}} ${{item.getAttribute?.('data-testid') || ''}}`)
+        .join(' ')
+        .toLowerCase();
+    }};
+    const scoreBoard = (el) => {{
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      const side = Math.min(rect.width, rect.height);
+      if (
+        side < 140 ||
+        Math.abs(rect.width - rect.height) > side * 0.18 ||
+        style.display === 'none' ||
+        style.visibility === 'hidden'
+      ) return null;
+      const context = contextText(el);
+      let score = side * side;
+      if (el === cached) score += 50000;
+      if (/\\b(round|analyse|analysis|game|live|board-layout|board-main)\\b/.test(context)) score += 500000;
+      if (/\\b(mini|mini-board|miniboard|thumbnail|preview|advert|advertisement|promo)\\b/.test(context)) score -= 1000000;
+      if (el.matches?.('wc-chess-board, chess-board, cg-board, #board-single, #boardRoot0 canvas')) score += 100000;
+      return {{ el, rect, score }};
+    }};
     const candidates = Array.from(document.querySelectorAll(selector))
-      .map((el) => ({{ el, rect: el.getBoundingClientRect() }}))
-      .filter((item) => item.rect.width > 250 && Math.abs(item.rect.width - item.rect.height) < item.rect.width * 0.15)
-      .sort((a, b) => (b.rect.width * b.rect.height) - (a.rect.width * a.rect.height));
+      .map(scoreBoard)
+      .filter(Boolean)
+      .sort((a, b) => b.score - a.score);
     if (candidates.length) {{
       window.__chessAssistantMainBoard = candidates[0].el;
       return candidates[0].el;
@@ -787,7 +851,7 @@ class DomBoardReader:
     let node = piece.parentElement;
     while (node && node !== document.body) {{
       const rect = node.getBoundingClientRect();
-      if (rect.width > 250 && Math.abs(rect.width - rect.height) < rect.width * 0.12) {{
+      if (rect.width > 140 && Math.abs(rect.width - rect.height) < rect.width * 0.12) {{
         window.__chessAssistantMainBoard = node;
         return node;
       }}
@@ -854,9 +918,8 @@ class DomBoardReader:
     }};
   }};
 
-  const start = center(fromFile, fromRank);
-  const end = center(toFile, toRank);
   const old = document.getElementById('chess-assistant-web-overlay');
+  window.__chessAssistantOverlayCleanup?.();
   if (old) old.remove();
 
   const overlay = document.createElement('div');
@@ -867,9 +930,20 @@ class DomBoardReader:
   overlay.style.width = '100vw';
   overlay.style.height = '100vh';
   overlay.style.pointerEvents = 'none';
-  overlay.style.zIndex = '2147483647';
+  overlay.style.setProperty('z-index', '2147483647', 'important');
+  overlay.style.isolation = 'isolate';
 
-  const makeSquare = (point, color) => {{
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('width', '100%');
+  svg.setAttribute('height', '100%');
+  svg.style.position = 'fixed';
+  svg.style.inset = '0';
+  svg.style.overflow = 'visible';
+  svg.style.zIndex = '0';
+  svg.style.filter = 'drop-shadow(0 2px 2px rgba(0,0,0,.75))';
+  overlay.appendChild(svg);
+
+  const makeSquare = (point, color, opacity = 1) => {{
     const mark = document.createElement('div');
     mark.style.position = 'fixed';
     mark.style.left = `${{point.x - square * 0.5}}px`;
@@ -880,15 +954,202 @@ class DomBoardReader:
     mark.style.border = `${{Math.max(4, square * 0.075)}}px solid ${{color}}`;
     mark.style.background = 'transparent';
     mark.style.boxShadow = '0 0 0 2px rgba(255,255,255,0.55), 0 0 12px rgba(0,0,0,0.28)';
+    mark.style.opacity = String(opacity);
     return mark;
   }};
 
-  const fromMark = makeSquare(start, '#dc2626');
-  const toMark = makeSquare(end, '#16a34a');
+  const rolePriority = (move) => {{
+    const role = String(move.role || '');
+    if (role.includes('E') && role.includes('T')) return 4;
+    if (role.includes('E')) return 3;
+    if (role.includes('T')) return 2;
+    return 0;
+  }};
+  // Paint ordinary candidates first. E/T candidates are appended last, so
+  // their SVG arrows remain on top when several paths overlap.
+  const renderMoves = [...moves].sort((a, b) => rolePriority(a) - rolePriority(b));
+  const marks = renderMoves.map((move) => {{
+    const color = String(move.color || '#cbd5e1');
+    const priority = rolePriority(move);
+    const hasRole = priority > 0;
+    const start = center(move.fromFile, move.fromRank);
+    const end = center(move.toFile, move.toRank);
+    // The source is deliberately neutral: several candidate moves can start
+    // from the same piece. The colored arrow is the unambiguous pairing.
+    const fromMark = makeSquare(start, '#f8fafc', 0.72);
+    fromMark.style.borderStyle = 'dashed';
+    fromMark.style.zIndex = String(hasRole ? 30 + priority : 10);
+    const toMark = makeSquare(end, color);
+    toMark.style.zIndex = String(hasRole ? 32 + priority : 12);
+    const arrowOutline = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    arrowOutline.setAttribute('stroke', 'rgba(2,6,23,.9)');
+    arrowOutline.setAttribute('stroke-linecap', 'round');
+    arrowOutline.setAttribute('opacity', hasRole ? '1' : '.48');
+    const arrowLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    arrowLine.setAttribute('stroke', color);
+    arrowLine.setAttribute('stroke-linecap', 'round');
+    arrowLine.setAttribute('opacity', hasRole ? '1' : '.52');
+    const arrowHead = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+    arrowHead.setAttribute('fill', color);
+    arrowHead.setAttribute('stroke', 'rgba(2,6,23,.9)');
+    arrowHead.setAttribute('stroke-width', '2');
+    arrowHead.setAttribute('opacity', hasRole ? '1' : '.58');
+    svg.appendChild(arrowOutline);
+    svg.appendChild(arrowLine);
+    svg.appendChild(arrowHead);
 
-  overlay.appendChild(fromMark);
-  overlay.appendChild(toMark);
+    const midBadge = document.createElement('div');
+    midBadge.style.position = 'fixed';
+    midBadge.style.width = `${{Math.max(22, square * 0.30)}}px`;
+    midBadge.style.height = `${{Math.max(22, square * 0.30)}}px`;
+    midBadge.style.boxSizing = 'border-box';
+    midBadge.style.borderRadius = '999px';
+    midBadge.style.background = '#08111f';
+    midBadge.style.color = color;
+    midBadge.style.border = `2px solid ${{color}}`;
+    midBadge.style.font = `900 ${{Math.max(12, square * 0.18)}}px/1 system-ui, sans-serif`;
+    midBadge.style.display = 'flex';
+    midBadge.style.alignItems = 'center';
+    midBadge.style.justifyContent = 'center';
+    midBadge.style.filter = 'drop-shadow(0 2px 3px rgba(0,0,0,.8))';
+    midBadge.style.zIndex = String(hasRole ? 40 + priority : 20);
+    midBadge.style.opacity = hasRole ? '1' : '.72';
+    midBadge.textContent = String(move.rank);
+    const badge = document.createElement('div');
+    badge.style.position = 'fixed';
+    badge.style.minWidth = `${{Math.max(22, square * 0.32)}}px`;
+    badge.style.height = `${{Math.max(22, square * 0.32)}}px`;
+    badge.style.padding = '0 5px';
+    badge.style.boxSizing = 'border-box';
+    badge.style.borderRadius = '999px';
+    badge.style.background = color;
+    badge.style.color = '#08111f';
+    badge.style.border = '2px solid white';
+    badge.style.font = `800 ${{Math.max(12, square * 0.18)}}px/1 system-ui, sans-serif`;
+    badge.style.display = 'flex';
+    badge.style.alignItems = 'center';
+    badge.style.justifyContent = 'center';
+    badge.style.whiteSpace = 'nowrap';
+    badge.style.filter = 'drop-shadow(0 2px 3px rgba(0,0,0,.65))';
+    badge.style.zIndex = String(hasRole ? 50 + priority : 22);
+    badge.style.opacity = hasRole ? '1' : '.76';
+    badge.textContent = [
+      `#${{move.rank}}`,
+      move.role ? String(move.role) : '',
+      move.score ? String(move.score) : '',
+    ].filter(Boolean).join(' · ');
+    overlay.appendChild(fromMark);
+    overlay.appendChild(toMark);
+    overlay.appendChild(midBadge);
+    overlay.appendChild(badge);
+    return {{move, priority, hasRole, fromMark, toMark, arrowOutline, arrowLine, arrowHead, midBadge, badge}};
+  }});
   document.documentElement.appendChild(overlay);
-  return {{ok: true}};
+
+  const updateOverlay = () => {{
+    if (!board.isConnected || !overlay.isConnected) return;
+    const currentRect = board.getBoundingClientRect();
+    const currentSide = Math.min(currentRect.width, currentRect.height);
+    if (currentSide <= 0) return;
+    const currentLeft = currentRect.left + (currentRect.width - currentSide) / 2;
+    const currentTop = currentRect.top + (currentRect.height - currentSide) / 2;
+    const currentSquare = currentSide / 8;
+    const currentText = [board, board.parentElement, board.parentElement?.parentElement]
+      .filter(Boolean)
+      .map((el) => `${{el.className || ''}} ${{el.getAttribute?.('data-orientation') || ''}} ${{el.getAttribute?.('orientation') || ''}}`)
+      .join(' ')
+      .toLowerCase();
+    let currentBlackAtBottom = data.perspective === 'black';
+    if (currentText.includes('flipped') || currentText.includes('orientation-black') || currentText.includes('orientation black')) currentBlackAtBottom = true;
+    if (currentText.includes('orientation-white') || currentText.includes('orientation white')) currentBlackAtBottom = false;
+    const currentA1 = board.querySelector?.('[data-square="a1"]');
+    if (currentA1) {{
+      const anchor = currentA1.getBoundingClientRect();
+      currentBlackAtBottom =
+        anchor.left + anchor.width / 2 > currentRect.left + currentRect.width / 2 &&
+        anchor.top + anchor.height / 2 < currentRect.top + currentRect.height / 2;
+    }}
+    const currentCenter = (file, rank) => {{
+      const col = currentBlackAtBottom ? 8 - file : file - 1;
+      const row = currentBlackAtBottom ? rank - 1 : 8 - rank;
+      return {{
+        x: currentLeft + (col + 0.5) * currentSquare,
+        y: currentTop + (row + 0.5) * currentSquare,
+      }};
+    }};
+    const placeMark = (mark, point) => {{
+      mark.style.left = `${{point.x - currentSquare * 0.5}}px`;
+      mark.style.top = `${{point.y - currentSquare * 0.5}}px`;
+      mark.style.width = `${{currentSquare}}px`;
+      mark.style.height = `${{currentSquare}}px`;
+      mark.style.borderWidth = `${{Math.max(4, currentSquare * 0.075)}}px`;
+    }};
+    marks.forEach((item) => {{
+      const start = currentCenter(item.move.fromFile, item.move.fromRank);
+      const end = currentCenter(item.move.toFile, item.move.toRank);
+      placeMark(item.fromMark, start);
+      placeMark(item.toMark, end);
+      const dx = end.x - start.x;
+      const dy = end.y - start.y;
+      const distance = Math.max(1, Math.hypot(dx, dy));
+      const ux = dx / distance;
+      const uy = dy / distance;
+      const lineStart = {{x: start.x + ux * currentSquare * 0.24, y: start.y + uy * currentSquare * 0.24}};
+      const tip = {{x: end.x - ux * currentSquare * 0.18, y: end.y - uy * currentSquare * 0.18}};
+      const headLength = Math.max(13, currentSquare * 0.24);
+      const headWidth = Math.max(8, currentSquare * 0.15);
+      const base = {{x: tip.x - ux * headLength, y: tip.y - uy * headLength}};
+      const px = -uy;
+      const py = ux;
+      const setLine = (line) => {{
+        line.setAttribute('x1', String(lineStart.x));
+        line.setAttribute('y1', String(lineStart.y));
+        line.setAttribute('x2', String(base.x));
+        line.setAttribute('y2', String(base.y));
+      }};
+      setLine(item.arrowOutline);
+      setLine(item.arrowLine);
+      item.arrowOutline.setAttribute(
+        'stroke-width', String(Math.max(item.hasRole ? 10 : 7, currentSquare * (item.hasRole ? 0.17 : 0.12)))
+      );
+      item.arrowLine.setAttribute(
+        'stroke-width', String(Math.max(item.hasRole ? 6 : 4, currentSquare * (item.hasRole ? 0.105 : 0.072)))
+      );
+      item.arrowHead.setAttribute(
+        'points',
+        `${{tip.x}},${{tip.y}} ${{base.x + px * headWidth}},${{base.y + py * headWidth}} ` +
+        `${{base.x - px * headWidth}},${{base.y - py * headWidth}}`
+      );
+      const midX = lineStart.x + (base.x - lineStart.x) * 0.52;
+      const midY = lineStart.y + (base.y - lineStart.y) * 0.52;
+      const midSize = Math.max(22, currentSquare * 0.30);
+      item.midBadge.style.left = `${{midX - midSize / 2}}px`;
+      item.midBadge.style.top = `${{midY - midSize / 2}}px`;
+      item.midBadge.style.width = `${{midSize}}px`;
+      item.midBadge.style.height = `${{midSize}}px`;
+      item.midBadge.style.fontSize = `${{Math.max(12, currentSquare * 0.18)}}px`;
+      const badgeHeight = Math.max(22, currentSquare * 0.32);
+      item.badge.style.left = `${{end.x - currentSquare * 0.46}}px`;
+      item.badge.style.top = `${{end.y - currentSquare * 0.46}}px`;
+      item.badge.style.height = `${{badgeHeight}}px`;
+      item.badge.style.minWidth = `${{badgeHeight}}px`;
+      item.badge.style.fontSize = `${{Math.max(12, currentSquare * 0.18)}}px`;
+    }});
+  }};
+
+  const resizeObserver = typeof ResizeObserver === 'function'
+    ? new ResizeObserver(updateOverlay)
+    : null;
+  resizeObserver?.observe(board);
+  window.addEventListener('resize', updateOverlay, {{ passive: true }});
+  document.addEventListener('fullscreenchange', updateOverlay);
+  window.__chessAssistantOverlayCleanup = () => {{
+    resizeObserver?.disconnect();
+    window.removeEventListener('resize', updateOverlay);
+    document.removeEventListener('fullscreenchange', updateOverlay);
+    window.__chessAssistantOverlayCleanup = null;
+  }};
+  updateOverlay();
+  return {{ok: true, moveCount: moves.length}};
 }})()
 """

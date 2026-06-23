@@ -104,10 +104,21 @@ File `config/settings.json` sẽ tự được tạo trên máy mới. File này
 
 Nút **Overlay trên web** chuyển giữa hai cách hiển thị:
 
-- **BẬT**: đánh dấu nước tốt nhất trực tiếp trên bàn cờ website; bàn cờ trong ứng dụng được ẩn để giao diện gọn hơn.
+- **BẬT**: với chess.com và Lichess, vẽ tối đa 4 mũi tên màu nối rõ ô nguồn–đích, đánh số `#1`–`#4` trên đường đi và hiện điểm tại ô đích. Để không che bàn cờ, overlay dùng `E` cho **ENGINE** và `T` cho **THỰC DỤNG**; UI app vẫn ghi đầy đủ. Ô nguồn dùng viền trắng nét đứt để không gây nhầm khi một quân có nhiều phương án; bàn cờ trong ứng dụng được ẩn để giao diện gọn hơn.
+- Các nước có nhãn `E` hoặc `T` được vẽ trên cùng, đậm và rõ hơn; các phương án còn lại mảnh, mờ hơn để không che lựa chọn ưu tiên.
 - **TẮT**: xóa dấu gợi ý khỏi website và hiển thị bàn cờ, mũi tên cùng chỉ dẫn trong ứng dụng. Dùng chế độ này khi live stream website để overlay không xuất hiện trên luồng phát.
 
 Lựa chọn được lưu trong `config/settings.json` và được giữ lại ở lần mở ứng dụng tiếp theo. Phần log luôn tự cuộn tới sự kiện mới nhất.
+
+Preset **Rapid** dùng chung cấu hình tối ưu cho Chess.com và Lichess: 12 luồng, Hash 4096 MB, 4 phương án, thời gian thông minh 0,7–3 giây và Ponder tắt. Website được chọn bằng các nút mở trang riêng, nên không cần hai preset Rapid trùng lặp.
+
+Trong danh sách phương án, nhãn **ENGINE** luôn chỉ nước Stockfish xếp hạng đầu. Nhãn **THỰC DỤNG** chỉ phương án tự nhiên, dễ chơi và có mức mất điểm chấp nhận được; nhãn này có thể trùng với nước engine khi không có lựa chọn thay thế đủ an toàn.
+
+Trên màn hình dọc 1080p, bảng kết quả ưu tiên **Độ khó thế cờ** và **Các lựa chọn**. Khối nước tốt nhất riêng được lược khỏi bố cục vì đã trùng với phương án `#1`; độ sâu, chi tiết engine và trạng thái nằm thấp hơn trong vùng cuộn.
+
+Khung điều khiển dùng bố cục 8 cột, 5 hàng: các preset cùng hàng, bốn nút website cùng hàng và trạng thái overlay nằm cạnh tóm tắt cấu hình. Chiều cao nút, khoảng cách và phần đệm được giảm để dành thêm không gian cho kết quả.
+
+Số phương án tự đổi theo nhịp độ trên Chess.com/Lichess: Rapid dùng `4`, Blitz dùng `2`, Bullet dùng `1`. Bullet chỉ hiện lựa chọn `E`; Blitz vẫn có thể so sánh `E` và `T`. Các giá trị này có thể chỉnh trong **Cài đặt → Nhịp độ → Số phương án**.
 
 Nút **Bullet 1′** là preset thời gian nhanh: bật để tắt Thời gian thông minh và dùng cố định `400 ms/nước`; tắt để trở về `1000 ms/nước`. Nếu bật lại Thời gian thông minh hoặc chỉnh tay sang giá trị khác, trạng thái Bullet sẽ tự tắt.
 

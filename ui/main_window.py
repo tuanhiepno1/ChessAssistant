@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import html
 import math
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -8,7 +10,7 @@ from typing import Any
 import chess
 import numpy as np
 from PySide6.QtCore import QObject, QPointF, QThread, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF, QTextCursor
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -21,9 +23,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
+    QScrollArea,
     QSpinBox,
     QSizePolicy,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -282,6 +284,7 @@ class RealtimeWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
+            dom_fallback_reason = ""
             try:
                 reader = DomBoardReader(
                     preferred_site=self.preferred_site,
@@ -332,6 +335,7 @@ class RealtimeWorker(QObject):
                         allow_piece_increase_resync=(
                             state.site == "chessclub" or self.force_analysis
                         ),
+                        trusted_turn_hint=state.turn_reliable,
                     )
                     fen = reconciled.fen
                     reconciled_accepted = reconciled.accepted
@@ -350,6 +354,12 @@ class RealtimeWorker(QObject):
                     f"clock {state.active_clock_position or 'không rõ'}). "
                     f"{reconciled_status}"
                 )
+                preferred_site = self._normalized_site(self.preferred_site)
+                if preferred_site != "auto" and preferred_site != state.site:
+                    status = (
+                        f"DOM tự chọn {state.site} thay cho site đã lưu {preferred_site}. "
+                        f"{status}"
+                    )
                 if not reconciled_accepted:
                     self.finished.emit(None, fen, len(state.pieces), None, None, status)
                     return
@@ -372,7 +382,12 @@ class RealtimeWorker(QObject):
                 ):
                     self.finished.emit(None, fen, len(state.pieces), None, None, status)
                     return
-                result = self._analyze(fen)
+                result, changed_during_analysis = self._analyze_with_dom_monitor(
+                    fen,
+                    reader,
+                    self._piece_signature(state.pieces),
+                    multipv=self._realtime_multipv(state.site),
+                )
                 latest_state = reader.read()
                 time.sleep(stability_delay)
                 latest_confirmed = reader.read()
@@ -389,7 +404,11 @@ class RealtimeWorker(QObject):
                     )
                     return
                 latest_state = latest_confirmed
-                if self._piece_signature(latest_state.pieces) != self._piece_signature(state.pieces):
+                if (
+                    changed_during_analysis
+                    or self._piece_signature(latest_state.pieces)
+                    != self._piece_signature(state.pieces)
+                ):
                     if latest_state.exact_fen:
                         latest_fen = latest_state.exact_fen
                     else:
@@ -407,6 +426,7 @@ class RealtimeWorker(QObject):
                             allow_piece_increase_resync=(
                                 latest_state.site == "chessclub" or self.force_analysis
                             ),
+                            trusted_turn_hint=latest_state.turn_reliable,
                         )
                         latest_fen = latest.fen
                     self.finished.emit(
@@ -420,8 +440,8 @@ class RealtimeWorker(QObject):
                     return
                 self.finished.emit(result, fen, len(state.pieces), None, None, status)
                 return
-            except DomUnavailableError:
-                pass
+            except DomUnavailableError as exc:
+                dom_fallback_reason = str(exc)
             except DomReadError as exc:
                 self.failed.emit(f"DOM tạm thời chưa đọc đủ bàn cờ: {exc}")
                 return
@@ -437,6 +457,7 @@ class RealtimeWorker(QObject):
                     board_image,
                     perspective=str(self.config.get("vision.perspective", "white")),
                 )
+                image_status = self._image_status(recognition.status, dom_fallback_reason)
                 preliminary_fen = FenBuilder().build(recognition.pieces, side_to_move=self.side_to_move)
                 preliminary_board = chess.Board(preliminary_fen)
                 if (
@@ -448,13 +469,17 @@ class RealtimeWorker(QObject):
                         perspective=str(self.config.get("vision.perspective", "white")),
                         player_color=self.side_to_move,
                     )
-                    self.finished.emit(None, update.fen, update.changed_squares, board_image, box, recognition.status)
+                    self.finished.emit(None, update.fen, update.changed_squares, board_image, box, image_status)
                     return
                 reconciled = PositionReconciler().reconcile(
                     recognition.pieces,
                     last_fen=self.last_fen,
                     turn_hint=self.side_to_move,
                     source="Nhận diện mẫu",
+                )
+                image_status = self._image_status(
+                    f"{recognition.status} {reconciled.status}",
+                    dom_fallback_reason,
                 )
                 fen = reconciled.fen
                 board = chess.Board(fen)
@@ -465,7 +490,7 @@ class RealtimeWorker(QObject):
                         len(recognition.pieces),
                         board_image,
                         box,
-                        f"{recognition.status} {reconciled.status}",
+                        image_status,
                     )
                     return
                 if board.turn != self.side_to_move:
@@ -473,15 +498,15 @@ class RealtimeWorker(QObject):
                         board.turn = self.side_to_move
                         fen = board.fen()
                     else:
-                        self.finished.emit(None, fen, len(recognition.pieces), board_image, box, reconciled.status)
+                        self.finished.emit(None, fen, len(recognition.pieces), board_image, box, image_status)
                         return
                 if not self._should_analyze(
                     fen, self.last_fen, self.has_current_analysis, self.force_analysis
                 ):
-                    self.finished.emit(None, fen, len(recognition.pieces), board_image, box, reconciled.status)
+                    self.finished.emit(None, fen, len(recognition.pieces), board_image, box, image_status)
                     return
-                result = self._analyze(fen)
-                self.finished.emit(result, fen, len(recognition.pieces), board_image, box, reconciled.status)
+                result = self._analyze(fen, multipv=self._preferred_site_multipv())
+                self.finished.emit(result, fen, len(recognition.pieces), board_image, box, image_status)
                 return
 
             detector = YoloDetector(
@@ -505,38 +530,119 @@ class RealtimeWorker(QObject):
                 turn_hint=self.side_to_move,
                 source="YOLO",
             )
+            image_status = self._image_status(reconciled.status, dom_fallback_reason)
             fen = reconciled.fen
             board = chess.Board(fen)
             if not reconciled.accepted:
-                self.finished.emit(None, fen, len(detections), board_image, box, reconciled.status)
+                self.finished.emit(None, fen, len(detections), board_image, box, image_status)
                 return
             if board.turn != self.side_to_move:
                 if self.force_analysis:
                     board.turn = self.side_to_move
                     fen = board.fen()
                 else:
-                    self.finished.emit(None, fen, len(detections), board_image, box, reconciled.status)
+                    self.finished.emit(None, fen, len(detections), board_image, box, image_status)
                     return
             if not self._should_analyze(
                 fen, self.last_fen, self.has_current_analysis, self.force_analysis
             ):
-                self.finished.emit(None, fen, len(detections), board_image, box, reconciled.status)
+                self.finished.emit(None, fen, len(detections), board_image, box, image_status)
                 return
-            result = self._analyze(fen)
-            self.finished.emit(result, fen, len(detections), board_image, box, reconciled.status)
+            result = self._analyze(fen, multipv=self._preferred_site_multipv())
+            self.finished.emit(result, fen, len(detections), board_image, box, image_status)
         except Exception as exc:
             self.failed.emit(str(exc))
 
-    def _analyze(self, fen: str) -> AnalysisResult:
+    def _analyze(self, fen: str, multipv: int = 1) -> AnalysisResult:
         try:
-            return self.engine_manager.analyze_fen(
-                fen,
-                force=self.force_analysis,
-                realtime=not self.force_analysis,
-            )
+            kwargs = {
+                "force": self.force_analysis,
+                "realtime": not self.force_analysis,
+            }
+            if self.force_analysis or multipv > 1:
+                kwargs["multipv_override"] = multipv
+            return self.engine_manager.analyze_fen(fen, **kwargs)
         except Exception as exc:
-            self.engine_manager.close()
+            self.engine_manager.close_engine()
             raise RuntimeError(f"Stockfish gặp lỗi: {exc}") from exc
+
+    def _analyze_with_dom_monitor(
+        self,
+        fen: str,
+        reader: DomBoardReader,
+        initial_signature: tuple[tuple[int, str], ...],
+        multipv: int = 1,
+    ) -> tuple[AnalysisResult | None, bool]:
+        stop_monitor = threading.Event()
+        board_changed = threading.Event()
+
+        def monitor() -> None:
+            while not stop_monitor.wait(0.10):
+                try:
+                    current = reader.read()
+                except (DomUnavailableError, DomReadError):
+                    continue
+                if self._piece_signature(current.pieces) == initial_signature:
+                    continue
+                board_changed.set()
+                self.engine_manager.cancel_analysis()
+                return
+
+        monitor_thread = threading.Thread(
+            target=monitor,
+            daemon=True,
+            name="dom-position-monitor",
+        )
+        monitor_thread.start()
+        try:
+            try:
+                result = self._analyze(fen, multipv=multipv)
+            except RuntimeError:
+                if not board_changed.is_set():
+                    raise
+                result = None
+        finally:
+            stop_monitor.set()
+            monitor_thread.join(timeout=0.5)
+        return result, board_changed.is_set()
+
+    @staticmethod
+    def _image_status(status: str, dom_fallback_reason: str) -> str:
+        if not dom_fallback_reason:
+            return status
+        return f"Fallback hình ảnh vì DOM: {dom_fallback_reason} {status}"
+
+    @staticmethod
+    def _normalized_site(site: str) -> str:
+        aliases = {
+            "chesscom": "chess.com",
+            "play.chessbase.com": "chessbase",
+            "icc": "chessclub",
+            "play.chessclub.com": "chessclub",
+        }
+        normalized = site.lower()
+        return aliases.get(normalized, normalized)
+
+    def _preferred_site_multipv(self) -> int:
+        return self._realtime_multipv(self.preferred_site)
+
+    def _realtime_multipv(self, site: str) -> int:
+        active = str(self.config.get("analysis.active_time_control_preset", "")).upper()
+        configured = 4
+        if active:
+            configured = int(
+                self.config.get(
+                    f"time_control_presets.{active}.multipv",
+                    self.config.get("engine.multipv", 4),
+                )
+            )
+        return self._site_multipv(site, configured)
+
+    @classmethod
+    def _site_multipv(cls, site: str, configured: int = 4) -> int:
+        if cls._normalized_site(site) not in {"chess.com", "lichess"}:
+            return 1
+        return max(1, min(int(configured), 4))
 
     @staticmethod
     def _should_analyze(
@@ -616,6 +722,9 @@ class MainWindow(QMainWindow):
 
         controls = QGroupBox("Điều khiển")
         top_bar = QGridLayout(controls)
+        top_bar.setContentsMargins(8, 4, 8, 7)
+        top_bar.setHorizontalSpacing(6)
+        top_bar.setVerticalSpacing(5)
         self.profile_combo = QComboBox()
         self.profile_combo.addItem("Yếu", "WEAK")
         self.profile_combo.addItem("Trung bình", "MEDIUM")
@@ -630,15 +739,21 @@ class MainWindow(QMainWindow):
             "Tự tăng thời gian cho thế khó và giảm thời gian cho thế dễ. "
             "Khi bật, thời gian cố định bên cạnh sẽ được bỏ qua."
         )
-        self.bullet_time_button = QPushButton("⚡ Bullet 1′ · 400 ms")
-        self.bullet_time_button.setCheckable(True)
-        self.bullet_time_button.setToolTip(
-            "Áp dụng nhanh thời gian cố định 400 ms mỗi nước và tắt Thời gian thông minh."
-        )
-        self.bullet_time_button.setStyleSheet(
-            "font-weight: 700; padding: 6px 10px; background: #78350f; "
-            "color: #fef3c7; border: 1px solid #f59e0b; border-radius: 6px;"
-        )
+        self.rapid_time_button = QPushButton("Rapid")
+        self.blitz_time_button = QPushButton("Blitz")
+        self.bullet_time_button = QPushButton("Bullet")
+        for button in (
+            self.rapid_time_button,
+            self.blitz_time_button,
+            self.bullet_time_button,
+        ):
+            button.setToolTip("Áp dụng ngay preset nhịp độ đã lưu trong Cài đặt.")
+            button.setCheckable(True)
+            button.setAutoExclusive(True)
+            button.setStyleSheet(
+                "QPushButton:checked { background: #166534; color: #dcfce7; "
+                "border: 1px solid #22c55e; font-weight: 700; }"
+            )
         self.side_combo = QComboBox()
         self.side_combo.addItem("Tôi cầm Trắng", "white")
         self.side_combo.addItem("Tôi cầm Đen", "black")
@@ -653,21 +768,22 @@ class MainWindow(QMainWindow):
             "Đọc lại bàn cờ, bỏ cache và dùng thời gian phân tích sâu tối đa của chế độ hiện tại."
         )
         self.refresh_best_button.setStyleSheet(
-            "font-size: 15px; font-weight: 700; padding: 9px 14px; "
+            "font-size: 14px; font-weight: 700; padding: 6px 10px; "
             "background: #166534; color: #f0fdf4; border: 1px solid #22c55e; border-radius: 7px;"
         )
         self.web_overlay_button = QPushButton()
         self.web_overlay_button.setCheckable(True)
         self.web_overlay_button.setToolTip(
-            "Bật: đánh dấu nước tốt nhất trên bàn cờ website và ẩn bàn cờ trong ứng dụng.\n"
-            "Tắt: website không có dấu gợi ý; nước tốt nhất chỉ hiện trong ứng dụng, phù hợp khi live stream."
+            "Bật: vẽ mũi tên màu, số thứ tự và điểm cho tối đa 4 nước trên website; "
+            "ô nguồn có viền trắng nét đứt, ô đích mang màu của nước đi.\n"
+            "Tắt: website không có dấu gợi ý; các nước chỉ hiện trong ứng dụng, phù hợp khi live stream."
         )
         self.new_game_button.setStyleSheet(
-            "font-weight: 700; padding: 7px 12px; background: #431407; "
+            "font-weight: 700; padding: 5px 9px; background: #431407; "
             "color: #fdba74; border: 1px solid #c2410c; border-radius: 6px;"
         )
         site_button_style = (
-            "font-weight: 600; padding: 7px 10px; background: #172554; "
+            "font-weight: 600; padding: 5px 8px; background: #172554; "
             "color: #bfdbfe; border: 1px solid #2563eb; border-radius: 6px;"
         )
         for button in (
@@ -678,34 +794,60 @@ class MainWindow(QMainWindow):
         ):
             button.setStyleSheet(site_button_style)
         self.settings_button.setStyleSheet(
-            "padding: 7px 10px; background: #1e293b; color: #cbd5e1; "
+            "padding: 5px 8px; background: #1e293b; color: #cbd5e1; "
             "border: 1px solid #475569; border-radius: 6px;"
         )
+        for control in (
+            self.profile_combo,
+            self.time_spin,
+            self.side_combo,
+            self.rapid_time_button,
+            self.blitz_time_button,
+            self.bullet_time_button,
+            self.new_game_button,
+            self.open_chesscom_button,
+            self.open_lichess_button,
+            self.open_chessbase_button,
+            self.open_chessclub_button,
+            self.settings_button,
+            self.refresh_best_button,
+            self.web_overlay_button,
+        ):
+            control.setMinimumHeight(29)
+            control.setMaximumHeight(34)
         self.profile_summary_label = QLabel("-")
+        self.profile_summary_label.setWordWrap(True)
+        self.profile_summary_label.setMinimumWidth(0)
+        self.profile_summary_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         self.profile_summary_label.setStyleSheet(
-            "padding: 6px 10px; color: #bfdbfe; background: #172554; "
+            "padding: 4px 7px; color: #bfdbfe; background: #172554; "
             "border: 1px solid #1d4ed8; border-radius: 5px; font-weight: 600;"
         )
 
-        top_bar.addWidget(QLabel("Chế độ"), 0, 0)
-        top_bar.addWidget(self.profile_combo, 0, 1)
+        top_bar.addWidget(QLabel("Engine"), 0, 0)
+        top_bar.addWidget(self.profile_combo, 0, 1, 1, 2)
         self.time_label = QLabel("Mỗi nước")
-        top_bar.addWidget(self.time_label, 0, 2)
-        top_bar.addWidget(self.time_spin, 0, 3)
-        top_bar.addWidget(self.adaptive_time_checkbox, 1, 0, 1, 2)
-        top_bar.addWidget(self.bullet_time_button, 1, 2, 1, 2)
-        top_bar.addWidget(QLabel("Bên chơi"), 2, 0)
-        top_bar.addWidget(self.side_combo, 2, 1)
-        top_bar.addWidget(self.new_game_button, 2, 2)
-        top_bar.addWidget(self.settings_button, 2, 3)
-        top_bar.addWidget(self.open_chesscom_button, 3, 0)
-        top_bar.addWidget(self.open_lichess_button, 3, 1)
-        top_bar.addWidget(self.open_chessbase_button, 4, 0)
-        top_bar.addWidget(self.open_chessclub_button, 4, 1)
-        top_bar.addWidget(self.refresh_best_button, 3, 2, 2, 2)
-        top_bar.addWidget(self.web_overlay_button, 5, 0, 1, 4)
-        top_bar.addWidget(self.profile_summary_label, 6, 0, 1, 4)
-        top_bar.setColumnStretch(1, 1)
+        top_bar.addWidget(self.adaptive_time_checkbox, 0, 3, 1, 3)
+        top_bar.addWidget(self.time_label, 0, 6)
+        top_bar.addWidget(self.time_spin, 0, 7)
+        top_bar.addWidget(self.rapid_time_button, 1, 0, 1, 2)
+        top_bar.addWidget(self.blitz_time_button, 1, 2, 1, 2)
+        top_bar.addWidget(self.bullet_time_button, 1, 4, 1, 2)
+        top_bar.addWidget(self.refresh_best_button, 1, 6, 1, 2)
+        top_bar.addWidget(self.side_combo, 2, 0, 1, 3)
+        top_bar.addWidget(self.new_game_button, 2, 3, 1, 2)
+        top_bar.addWidget(self.settings_button, 2, 5, 1, 3)
+        top_bar.addWidget(self.open_chesscom_button, 3, 0, 1, 2)
+        top_bar.addWidget(self.open_lichess_button, 3, 2, 1, 2)
+        top_bar.addWidget(self.open_chessbase_button, 3, 4, 1, 2)
+        top_bar.addWidget(self.open_chessclub_button, 3, 6, 1, 2)
+        top_bar.addWidget(self.web_overlay_button, 4, 0, 1, 3)
+        top_bar.addWidget(self.profile_summary_label, 4, 3, 1, 5)
+        for column in range(8):
+            top_bar.setColumnStretch(column, 1)
         layout.addWidget(controls)
 
         fen_group = QGroupBox("Nhập FEN")
@@ -734,27 +876,73 @@ class MainWindow(QMainWindow):
         self.result_group = QGroupBox("Kết quả phân tích")
         result_layout = QVBoxLayout(self.result_group)
         self.best_move_label = QLabel("-")
-        self.best_move_label.setWordWrap(True)
         self.best_move_label.setStyleSheet("font-size: 24px; font-weight: 700; color: #4ade80;")
         self.best_move_label.setMinimumHeight(42)
         self.move_from_to_label = QLabel("-")
         self.move_from_to_label.setStyleSheet("font-size: 20px; font-weight: 600; color: #e2e8f0;")
         self.evaluation_label = QLabel("-")
+        self.candidate_moves_label = QLabel("-")
+        self.difficulty_label = QLabel("-")
         self.depth_label = QLabel("-")
         self.details_label = QLabel("-")
         self.fen_status_label = QLabel("-")
-        self.fen_status_label.setWordWrap(True)
+        # Dynamic text must wrap inside the width chosen by the user. Letting
+        # QLabel's content size hint drive the form can expand the main window
+        # whenever a longer move description or status arrives.
+        for label in (
+            self.best_move_label,
+            self.move_from_to_label,
+            self.evaluation_label,
+            self.candidate_moves_label,
+            self.difficulty_label,
+            self.depth_label,
+            self.details_label,
+            self.fen_status_label,
+        ):
+            label.setWordWrap(True)
+            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            label.setMinimumWidth(0)
+            label.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Preferred,
+            )
+        self.candidate_moves_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Minimum,
+        )
+        self.candidate_moves_label.setStyleSheet(
+            "font-size: 14px; color: #e2e8f0; padding: 6px; "
+            "background: #0f172a; border: 1px solid #334155; border-radius: 6px;"
+        )
+        self.candidate_moves_label.setTextFormat(Qt.TextFormat.RichText)
+        self.candidate_moves_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
 
         self.analysis_details_panel = QWidget()
-        form = QFormLayout(self.analysis_details_panel)
+        details_layout = QVBoxLayout(self.analysis_details_panel)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+        details_layout.setSpacing(6)
+        difficulty_title = QLabel("ĐỘ KHÓ THẾ CỜ")
+        difficulty_title.setStyleSheet("font-weight: 800; color: #cbd5e1;")
+        details_layout.addWidget(difficulty_title)
+        details_layout.addWidget(self.difficulty_label)
+        primary_details = QWidget()
+        form = QFormLayout(primary_details)
+        form.setContentsMargins(0, 0, 4, 0)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        form.setVerticalSpacing(12)
-        form.addRow("NƯỚC TỐT NHẤT", self.best_move_label)
-        form.addRow("CHỈ DẪN", self.move_from_to_label)
-        form.addRow("Đánh giá", self.evaluation_label)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setVerticalSpacing(6)
+        form.addRow("CÁC LỰA CHỌN", self.candidate_moves_label)
         form.addRow("Độ sâu", self.depth_label)
         form.addRow("Chi tiết", self.details_label)
         form.addRow("Trạng thái", self.fen_status_label)
+        details_scroll = QScrollArea()
+        details_scroll.setWidgetResizable(True)
+        details_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        details_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        details_scroll.setWidget(primary_details)
+        details_layout.addWidget(details_scroll, 1)
         self.board_widget = AnalysisBoardWidget()
         self.result_content_layout = QHBoxLayout()
         self.result_content_layout.setContentsMargins(0, 0, 0, 0)
@@ -765,21 +953,33 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.result_group, 5)
 
-        self.log_group = QGroupBox("Hoạt động gần đây · tự động theo dõi dòng mới nhất")
+        self.log_group = QGroupBox("Nhật ký trạng thái")
+        self.log_group.setMaximumHeight(125)
         log_layout = QVBoxLayout(self.log_group)
-        self.status_output = QTextEdit()
+        self.status_output = QPlainTextEdit()
         self.status_output.setReadOnly(True)
-        self.status_output.setMinimumHeight(180)
-        self.status_output.setMaximumHeight(280)
-        self.status_output.setStyleSheet("font-size: 13px; line-height: 1.35; padding: 6px;")
-        self.status_output.setPlaceholderText("Các thay đổi quan trọng sẽ xuất hiện ở đây.")
+        self.status_output.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.status_output.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.status_output.setMaximumBlockCount(120)
+        self.status_output.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.status_output.setMinimumHeight(64)
+        self.status_output.setMaximumHeight(88)
+        self.status_output.setStyleSheet(
+            "font-family: 'Segoe UI'; font-size: 13px; padding: 8px;"
+        )
+        self.status_output.setPlaceholderText("Trạng thái ứng dụng sẽ xuất hiện ở đây.")
         log_layout.addWidget(self.status_output)
-        layout.addWidget(self.log_group, 2)
+        layout.addWidget(self.log_group, 1)
 
         self.profile_combo.currentIndexChanged.connect(self._apply_profile)
         self.time_spin.valueChanged.connect(self._set_time)
         self.adaptive_time_checkbox.toggled.connect(self._set_adaptive_time)
-        self.bullet_time_button.toggled.connect(self._toggle_bullet_time)
+        self.rapid_time_button.clicked.connect(lambda: self._apply_time_control_preset("RAPID"))
+        self.blitz_time_button.clicked.connect(lambda: self._apply_time_control_preset("BLITZ"))
+        self.bullet_time_button.clicked.connect(lambda: self._apply_time_control_preset("BULLET"))
         self.side_combo.currentIndexChanged.connect(self._set_side)
         self.new_game_button.clicked.connect(self._new_game)
         self.open_chesscom_button.clicked.connect(self._open_chesscom)
@@ -798,20 +998,17 @@ class MainWindow(QMainWindow):
         if preset not in {"WEAK", "MEDIUM", "STRONG"}:
             preset = "STRONG"
         profile_index = self.profile_combo.findData(preset)
+        self.profile_combo.blockSignals(True)
         self.profile_combo.setCurrentIndex(max(profile_index, 0))
+        self.profile_combo.blockSignals(False)
         self.time_spin.setValue(int(self.config.get("analysis.time_ms", 1000)))
         self.adaptive_time_checkbox.blockSignals(True)
         self.adaptive_time_checkbox.setChecked(
             bool(self.config.get("analysis.adaptive_time_enabled", True))
         )
         self.adaptive_time_checkbox.blockSignals(False)
-        self.bullet_time_button.blockSignals(True)
-        self.bullet_time_button.setChecked(
-            not self.adaptive_time_checkbox.isChecked() and self.time_spin.value() == 400
-        )
-        self.bullet_time_button.blockSignals(False)
-        self._sync_bullet_button_style()
         self._sync_time_controls()
+        self._sync_active_time_control_indicator()
         self._refresh_profile_summary()
         perspective = str(self.config.get("vision.perspective", "white"))
         index = self.side_combo.findData(perspective)
@@ -847,23 +1044,23 @@ class MainWindow(QMainWindow):
         else:
             self.board_widget.setMinimumSize(460, 460)
         self.board_widget.setVisible(not enabled)
-        self.analysis_details_panel.setMinimumWidth(0 if enabled else 300)
-        self.analysis_details_panel.setMaximumWidth(16777215 if enabled else 360)
+        self.analysis_details_panel.setMinimumWidth(0 if enabled else 380)
+        self.analysis_details_panel.setMaximumWidth(16777215 if enabled else 480)
         self.result_content_layout.setStretch(0, 0 if enabled else 3)
         self.result_content_layout.setStretch(1, 1 if enabled else 2)
         self.root_layout.invalidate()
         self.centralWidget().updateGeometry()
         self.updateGeometry()
         if enabled:
-            self.web_overlay_button.setText("Overlay trên web: BẬT · Bàn cờ UI đang ẩn")
+            self.web_overlay_button.setText("Overlay web: BẬT · UI ẩn")
             self.web_overlay_button.setStyleSheet(
-                "font-weight: 700; padding: 8px 12px; background: #14532d; "
+                "font-weight: 700; padding: 5px 8px; background: #14532d; "
                 "color: #dcfce7; border: 1px solid #22c55e; border-radius: 6px;"
             )
         else:
-            self.web_overlay_button.setText("Overlay trên web: TẮT · Chỉ hiện trong UI (an toàn live stream)")
+            self.web_overlay_button.setText("Overlay web: TẮT · Chỉ UI")
             self.web_overlay_button.setStyleSheet(
-                "font-weight: 700; padding: 8px 12px; background: #7f1d1d; "
+                "font-weight: 700; padding: 5px 8px; background: #7f1d1d; "
                 "color: #fee2e2; border: 1px solid #ef4444; border-radius: 6px;"
             )
         QTimer.singleShot(0, self._resize_for_overlay_mode)
@@ -873,9 +1070,9 @@ class MainWindow(QMainWindow):
             return
         available = self.screen().availableGeometry()
         if self.web_overlay_button.isChecked():
-            desired_width, desired_height = 880, 760
+            desired_width, desired_height = 920, 940
         else:
-            desired_width, desired_height = 980, 940
+            desired_width, desired_height = 1080, 980
         self.resize(
             min(desired_width, available.width()),
             min(desired_height, available.height()),
@@ -885,34 +1082,38 @@ class MainWindow(QMainWindow):
     def _apply_profile(self, _index: int) -> None:
         profile = str(self.profile_combo.currentData())
         self.config.apply_profile(profile)
+        self.config.set("analysis.active_time_control_preset", "")
+        self.config.save()
         self.time_spin.blockSignals(True)
         self.time_spin.setValue(int(self.config.get("analysis.time_ms", 1000)))
         self.time_spin.blockSignals(False)
-        self._sync_bullet_state_from_controls()
         self._sync_time_controls()
         self._refresh_profile_summary()
+        self._sync_active_time_control_indicator()
         self.engine_manager.clear_cache()
         self._log(f"Sức mạnh Stockfish: {self.profile_combo.currentText()}.")
 
     @Slot(int)
     def _set_time(self, value: int) -> None:
         self.config.set("analysis.time_ms", value)
+        self.config.set("analysis.active_time_control_preset", "")
         profile = str(self.profile_combo.currentData())
         if profile in {"WEAK", "MEDIUM", "STRONG"}:
             self.config.set(f"profiles.{profile}.time_ms", value)
         self.config.save()
         self.engine_manager.clear_cache()
-        self._sync_bullet_state_from_controls()
         self._refresh_profile_summary()
+        self._sync_active_time_control_indicator()
 
     @Slot(bool)
     def _set_adaptive_time(self, enabled: bool) -> None:
         self.config.set("analysis.adaptive_time_enabled", enabled)
+        self.config.set("analysis.active_time_control_preset", "")
         self.config.save()
         self.engine_manager.clear_cache()
-        self._sync_bullet_state_from_controls()
         self._sync_time_controls()
         self._refresh_profile_summary()
+        self._sync_active_time_control_indicator()
         if enabled:
             self._log("Phân tích thông minh: tự điều chỉnh thời gian theo độ khó của thế cờ.")
         else:
@@ -920,50 +1121,74 @@ class MainWindow(QMainWindow):
                 f"Phân tích cố định: Stockfish dùng {self.time_spin.value() / 1000:.1f} giây mỗi nước."
             )
 
-    @Slot(bool)
-    def _toggle_bullet_time(self, enabled: bool) -> None:
-        time_ms = 400 if enabled else 1000
+    def _apply_time_control_preset(self, name: str) -> None:
+        enabled = self.config.toggle_time_control_preset(name)
+        profile = str(self.config.get("analysis.preset", "STRONG"))
+        profile_index = self.profile_combo.findData(profile)
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.setCurrentIndex(max(profile_index, 0))
+        self.profile_combo.blockSignals(False)
         self.adaptive_time_checkbox.blockSignals(True)
         self.time_spin.blockSignals(True)
-        self.adaptive_time_checkbox.setChecked(False)
-        self.time_spin.setValue(time_ms)
+        self.adaptive_time_checkbox.setChecked(
+            bool(self.config.get("analysis.adaptive_time_enabled", True))
+        )
+        self.time_spin.setValue(int(self.config.get("analysis.time_ms", 1000)))
         self.adaptive_time_checkbox.blockSignals(False)
         self.time_spin.blockSignals(False)
-
-        profile = str(self.profile_combo.currentData())
-        self.config.set("analysis.adaptive_time_enabled", False)
-        self.config.set("analysis.time_ms", time_ms)
-        if profile in {"WEAK", "MEDIUM", "STRONG"}:
-            self.config.set(f"profiles.{profile}.time_ms", time_ms)
-        self.config.save()
         self.engine_manager.clear_cache()
         self._sync_time_controls()
-        self._sync_bullet_button_style()
         self._refresh_profile_summary()
+        self._sync_active_time_control_indicator()
         if enabled:
-            self._log("Đã bật preset Bullet 1 phút: cố định 400 ms mỗi nước.")
+            self._log(f"Đã áp dụng preset {name.title()}.")
         else:
-            self._log("Đã tắt preset Bullet: trở về cố định 1000 ms mỗi nước.")
+            self._log("Đã trở về cấu hình Stockfish mạnh nhất mặc định.")
 
-    def _sync_bullet_button_style(self) -> None:
-        if self.bullet_time_button.isChecked():
-            self.bullet_time_button.setText("⚡ Bullet 1′: BẬT · 400 ms")
-            background, border, color = "#92400e", "#fbbf24", "#fffbeb"
-        else:
-            self.bullet_time_button.setText("⚡ Bullet 1′: TẮT · Bật 400 ms")
-            background, border, color = "#3f3f46", "#71717a", "#e4e4e7"
-        self.bullet_time_button.setStyleSheet(
-            f"font-weight: 700; padding: 6px 10px; background: {background}; "
-            f"color: {color}; border: 1px solid {border}; border-radius: 6px;"
-        )
+    def _sync_active_time_control_indicator(self) -> None:
+        active = str(self.config.get("analysis.active_time_control_preset", "")).upper()
+        preset = self.config.get(f"time_control_presets.{active}", {}) if active else {}
+        matches = isinstance(preset, dict) and bool(preset)
+        if matches and "adaptive_time_enabled" in preset:
+            matches = bool(preset["adaptive_time_enabled"]) == bool(
+                self.config.get("analysis.adaptive_time_enabled", True)
+            )
+        timing_keys = {
+            "threads": "engine.threads",
+            "hash_mb": "engine.hash_mb",
+            "multipv": "engine.multipv",
+            "skill_level": "engine.skill_level",
+            "contempt": "engine.contempt",
+            "time_ms": "analysis.time_ms",
+            "min_time_ms": "analysis.adaptive_min_time_ms",
+            "probe_time_ms": "analysis.adaptive_probe_time_ms",
+            "realtime_max_time_ms": "analysis.adaptive_realtime_max_time_ms",
+            "hard_max_time_ms": "analysis.adaptive_max_time_ms",
+        }
+        if matches:
+            for source, target in timing_keys.items():
+                if source in preset and int(preset[source]) != int(self.config.get(target, 0)):
+                    matches = False
+                    break
+        if matches and "site" in preset:
+            matches = str(preset["site"]) == str(self.config.get("browser.preferred_site", "auto"))
+        if matches and "game_minutes" in preset:
+            matches = int(preset["game_minutes"]) == int(self.config.get("analysis.game_minutes", 0))
+        if not matches:
+            active = ""
+            self.config.set("analysis.active_time_control_preset", "")
 
-    def _sync_bullet_state_from_controls(self) -> None:
-        self.bullet_time_button.blockSignals(True)
-        self.bullet_time_button.setChecked(
-            not self.adaptive_time_checkbox.isChecked() and self.time_spin.value() == 400
-        )
-        self.bullet_time_button.blockSignals(False)
-        self._sync_bullet_button_style()
+        buttons = {
+            "RAPID": self.rapid_time_button,
+            "BLITZ": self.blitz_time_button,
+            "BULLET": self.bullet_time_button,
+        }
+        for name, button in buttons.items():
+            button.blockSignals(True)
+            button.setAutoExclusive(False)
+            button.setChecked(name == active)
+            button.setAutoExclusive(True)
+            button.blockSignals(False)
 
     def _sync_time_controls(self) -> None:
         adaptive = self.adaptive_time_checkbox.isChecked()
@@ -971,21 +1196,18 @@ class MainWindow(QMainWindow):
         self.time_label.setEnabled(not adaptive)
 
     def _refresh_profile_summary(self) -> None:
-        profile = str(self.profile_combo.currentData())
-        values = self.config.get(f"profiles.{profile}", {})
-        if not isinstance(values, dict):
-            self.profile_summary_label.setText("-")
-            return
         if self.adaptive_time_checkbox.isChecked():
             min_time = int(self.config.get("analysis.adaptive_min_time_ms", 700)) / 1000
             max_time = int(self.config.get("analysis.adaptive_realtime_max_time_ms", 4200)) / 1000
             time_text = f"thông minh {min_time:.1f}–{max_time:.1f} giây"
         else:
             time_text = f"cố định {self.time_spin.value() / 1000:.1f} giây"
+        active = str(self.config.get("analysis.active_time_control_preset", "")).upper()
+        multipv_text = f"{int(self.config.get('engine.multipv', 1))} phương án"
         self.profile_summary_label.setText(
-            f"{int(values.get('threads', 1))} luồng  ·  "
-            f"{int(values.get('hash_mb', 128))} MB  ·  {time_text}  ·  "
-            f"{int(values.get('multipv', 1))} phương án"
+            f"{int(self.config.get('engine.threads', 1))} luồng  ·  "
+            f"{int(self.config.get('engine.hash_mb', 128))} MB  ·  {time_text}  ·  "
+            f"{multipv_text}"
         )
 
     @Slot()
@@ -1023,6 +1245,8 @@ class MainWindow(QMainWindow):
         self.best_move_label.setText("-")
         self.move_from_to_label.setText("-")
         self.evaluation_label.setText("-")
+        self.candidate_moves_label.setText("-")
+        self.difficulty_label.setText("-")
         self.depth_label.setText("-")
         self.details_label.setText("-")
         self.fen_status_label.setText("-")
@@ -1075,6 +1299,7 @@ class MainWindow(QMainWindow):
     def _open_settings(self) -> None:
         dialog = SettingsWindow(self.config, self)
         if dialog.exec():
+            self.engine_manager.refresh_opening_book()
             self.engine_manager.clear_cache()
             self._load_settings_into_controls()
             self._log("Đã lưu cài đặt và áp dụng cho lần phân tích tiếp theo.")
@@ -1356,6 +1581,17 @@ class MainWindow(QMainWindow):
         self.best_move_label.setText(self._describe_best_move(result))
         self.move_from_to_label.setText(self._from_to_text(result.best_move_uci))
         self.evaluation_label.setText(result.evaluation)
+        candidate_count = max(1, min(len(result.lines), 4))
+        self.candidate_moves_label.setMinimumHeight(
+            86 if candidate_count == 1 else 72 * candidate_count + 30
+        )
+        self.candidate_moves_label.setText(self._candidate_moves_text(result))
+        difficulty_text, difficulty_color = self._position_difficulty(result)
+        self.difficulty_label.setText(difficulty_text)
+        self.difficulty_label.setStyleSheet(
+            f"font-weight: 800; color: {difficulty_color}; padding: 8px 10px; "
+            "background: #111827; border: 1px solid #334155; border-radius: 6px;"
+        )
         self.depth_label.setText(str(result.depth or "-"))
         source_text = {
             "cache": "Bộ nhớ đệm",
@@ -1376,6 +1612,8 @@ class MainWindow(QMainWindow):
         self.best_move_label.setText("Đang chờ nước mới...")
         self.move_from_to_label.setText("-")
         self.evaluation_label.setText("-")
+        self.candidate_moves_label.setText("-")
+        self.difficulty_label.setText("-")
         self.depth_label.setText("-")
         self.details_label.setText("-")
         self._last_realtime_best_move = ""
@@ -1410,13 +1648,36 @@ class MainWindow(QMainWindow):
         if not self.web_overlay_button.isChecked():
             return
         try:
+            try:
+                human_index = self._human_candidate_index(
+                    chess.Board(result.fen), result.lines[:4]
+                )
+            except ValueError:
+                human_index = 1
+            moves = [
+                {
+                    "uci": line.move_uci,
+                    "label": line.move_san,
+                    "score": line.score,
+                    "rank": index,
+                    "color": self._candidate_color(index),
+                    "role": " · ".join(
+                        role
+                        for role, applies in (
+                            ("E", index == 1),
+                            ("T", index == human_index),
+                        )
+                        if applies
+                    ),
+                }
+                for index, line in enumerate(result.lines[:4], start=1)
+            ]
             DomBoardReader(
                 preferred_site=str(self.config.get("browser.preferred_site", "auto")),
                 target_id=self._browser_target_id,
-            ).show_best_move(
-                result.best_move_uci,
+            ).show_moves(
+                moves,
                 perspective=str(self.side_combo.currentData()),
-                label=self._describe_best_move(result),
             )
         except Exception:
             return
@@ -1430,22 +1691,215 @@ class MainWindow(QMainWindow):
         except Exception:
             return
 
+    def _candidate_moves_text(self, result: AnalysisResult) -> str:
+        try:
+            board = chess.Board(result.fen)
+        except ValueError:
+            return "Không thể đọc các phương án vì FEN không hợp lệ."
+
+        human_index = self._human_candidate_index(board, result.lines[:4])
+        best_cp = result.lines[0].score_cp if result.lines else None
+        descriptions = []
+        for index, line in enumerate(result.lines[:4], start=1):
+            move_text = self._describe_move(board, line.move_uci, line.move_san)
+            color = self._candidate_color(index)
+            ranking = "TỐT NHẤT" if index == 1 else f"LỰA CHỌN {index}"
+            badges = []
+            if index == 1:
+                badges.append(
+                    '<span style="background:#14532d; color:#dcfce7; padding:2px 6px; '
+                    'border-radius:4px; font-size:11px; font-weight:800;">ENGINE</span>'
+                )
+            if index == human_index:
+                badges.append(
+                    '<span style="background:#1e3a8a; color:#dbeafe; padding:2px 6px; '
+                    'border-radius:4px; font-size:11px; font-weight:800;">THỰC DỤNG</span>'
+                )
+            role_text = " &nbsp;" + " &nbsp;".join(badges) if badges else ""
+            practical_note = ""
+            if index == human_index:
+                if best_cp is not None and line.score_cp is not None:
+                    loss_cp = max(0, int(best_cp) - int(line.score_cp))
+                    practical_note = (
+                        '<br><span style="color:#93c5fd; font-size:12px;">'
+                        + (
+                            "Cũng là nước tự nhiên, thực dụng nhất."
+                            if loss_cp == 0
+                            else f"Thực dụng, dễ chơi; kém #1 khoảng {loss_cp / 100:.2f} điểm."
+                        )
+                        + "</span>"
+                    )
+            descriptions.append(
+                f'<div style="margin:3px 0 7px 0; padding:7px 9px; '
+                f'border-left:5px solid {color}; background:#111c30;">'
+                f'<span style="font-size:16px; font-weight:800; color:{color};">'
+                f'#{index} &nbsp; {html.escape(ranking)}</span>{role_text}<br>'
+                f'<span style="color:#f8fafc; font-weight:650;">{html.escape(move_text)}</span>'
+                f'<span style="color:#94a3b8;"> &nbsp;·&nbsp; Đánh giá </span>'
+                f'<span style="font-size:16px; font-weight:800; color:{color};">'
+                f'{html.escape(line.score)}</span>{practical_note}</div>'
+            )
+        if not descriptions:
+            return "Không có phương án hợp lệ."
+        return (
+            '<div style="color:#94a3b8; margin:0 0 5px 2px;">'
+            'Điểm + có lợi cho bên đang đi · điểm − có lợi cho đối thủ<br>'
+            '<span style="font-size:11px;">“Thực dụng” là phương án tự nhiên, dễ chơi và có mức mất điểm chấp nhận được.</span></div>'
+            + "".join(descriptions)
+        )
+
+    @classmethod
+    def _human_candidate_index(cls, board: chess.Board, lines: list[object]) -> int:
+        if len(lines) < 2:
+            return 0
+        best_cp = getattr(lines[0], "score_cp", None)
+        if best_cp is None:
+            return 1
+
+        tactical = board.is_check() or sum(
+            1 for move in board.legal_moves if board.is_capture(move)
+        ) >= 5
+        max_loss_cp = 30 if tactical else 60
+        best_index = 1
+        best_practical_score = cls._move_naturalness(board, getattr(lines[0], "move_uci", ""))
+
+        for index, line in enumerate(lines[1:], start=2):
+            score_cp = getattr(line, "score_cp", None)
+            if score_cp is None:
+                continue
+            loss_cp = max(0, int(best_cp) - int(score_cp))
+            if loss_cp > max_loss_cp:
+                continue
+            naturalness = cls._move_naturalness(board, getattr(line, "move_uci", ""))
+            practical_score = naturalness - loss_cp / 18.0 - (index - 1) * 0.15
+            if practical_score > best_practical_score + 0.25:
+                best_practical_score = practical_score
+                best_index = index
+        return best_index
+
+    @staticmethod
+    def _move_naturalness(board: chess.Board, move_uci: str) -> float:
+        try:
+            move = chess.Move.from_uci(move_uci)
+        except ValueError:
+            return -10.0
+        if move not in board.legal_moves:
+            return -10.0
+        piece = board.piece_at(move.from_square)
+        if piece is None:
+            return -10.0
+
+        score = 0.0
+        if board.is_castling(move):
+            score += 6.0
+        if board.is_capture(move):
+            score += 1.5
+        if board.gives_check(move):
+            score += 1.0
+        if move.promotion:
+            score += 4.0
+
+        from_rank = chess.square_rank(move.from_square)
+        to_file = chess.square_file(move.to_square)
+        back_rank = 0 if piece.color == chess.WHITE else 7
+        if piece.piece_type in {chess.KNIGHT, chess.BISHOP} and from_rank == back_rank:
+            score += 3.0
+        if piece.piece_type == chess.PAWN and to_file in {3, 4}:
+            score += 2.0
+        if piece.piece_type == chess.QUEEN and board.fullmove_number <= 10:
+            score -= 2.5
+        if piece.piece_type == chess.KING and not board.is_castling(move):
+            score -= 2.0
+
+        mover = board.turn
+        next_board = board.copy(stack=False)
+        next_board.push(move)
+        if next_board.is_attacked_by(not mover, move.to_square) and not next_board.is_attacked_by(
+            mover, move.to_square
+        ):
+            score -= 2.0
+        return score
+
+    @staticmethod
+    def _candidate_color(index: int) -> str:
+        return {
+            1: "#4ade80",
+            2: "#38bdf8",
+            3: "#facc15",
+            4: "#fb7185",
+        }.get(index, "#cbd5e1")
+
+    @staticmethod
+    def _position_difficulty(result: AnalysisResult) -> tuple[str, str]:
+        try:
+            board = chess.Board(result.fen)
+        except ValueError:
+            return "Chưa xác định — FEN không hợp lệ", "#94a3b8"
+
+        legal_count = board.legal_moves.count()
+        if legal_count <= 1:
+            return "DỄ — nước đi gần như bắt buộc", "#4ade80"
+
+        capture_count = sum(1 for move in board.legal_moves if board.is_capture(move))
+        tactical_pressure = board.is_check() or capture_count >= 5
+        scored_lines = [line for line in result.lines if line.score_cp is not None]
+        gap = None
+        if len(scored_lines) >= 2:
+            gap = int(scored_lines[0].score_cp) - int(scored_lines[1].score_cp)
+
+        if gap is not None and gap >= 120:
+            return (
+                "KHÓ — phương án số 1 vượt trội; các lựa chọn sau mất ít nhất "
+                f"{gap / 100:.2f} điểm",
+                "#f87171",
+            )
+        if tactical_pressure:
+            reason = "đang bị chiếu" if board.is_check() else "có nhiều nước bắt quân"
+            return f"KHÓ — thế chiến thuật, {reason}", "#f87171"
+        if len(scored_lines) >= 3:
+            third_gap = int(scored_lines[0].score_cp) - int(scored_lines[2].score_cp)
+            if gap is not None and gap <= 35 and third_gap <= 70:
+                return "DỄ — có nhiều nước gần tương đương để lựa chọn", "#4ade80"
+        if gap is not None and gap <= 80:
+            return "TRUNG BÌNH — vài phương án chơi được, ưu tiên phương án số 1", "#facc15"
+        if capture_count <= 2 and legal_count < 35:
+            return "DỄ — thế tương đối yên tĩnh", "#4ade80"
+        return "TRUNG BÌNH — cần cân nhắc thứ tự nước đi", "#facc15"
+
     def _describe_best_move(self, result: AnalysisResult) -> str:
         try:
             board = chess.Board(result.fen)
-            move = chess.Move.from_uci(result.best_move_uci)
-            piece = board.piece_at(move.from_square)
-            captured = board.piece_at(move.to_square)
         except ValueError:
             return result.best_move_san
-        if piece is None:
-            return result.best_move_san
+        return self._describe_move(board, result.best_move_uci, result.best_move_san)
 
-        text = f"{self._piece_name(piece)} từ {chess.square_name(move.from_square)} đến {chess.square_name(move.to_square)}"
+    def _describe_move(self, board: chess.Board, move_uci: str, fallback: str) -> str:
+        try:
+            move = chess.Move.from_uci(move_uci)
+        except ValueError:
+            return fallback
+        piece = board.piece_at(move.from_square)
+        if piece is None:
+            return fallback
+
+        from_square = chess.square_name(move.from_square)
+        to_square = chess.square_name(move.to_square)
+        text = f"{self._piece_name(piece)}: {from_square} → {to_square}"
+
+        captured_square = move.to_square
+        if board.is_en_passant(move):
+            captured_square += -8 if piece.color == chess.WHITE else 8
+        captured = board.piece_at(captured_square)
         if captured is not None:
-            text += f", ăn {self._piece_name(captured).lower()}"
+            text += (
+                f", ăn {self._piece_name(captured)}"
+                f" tại {chess.square_name(captured_square)}"
+            )
+        if board.is_castling(move):
+            wing = "cánh vua" if chess.square_file(move.to_square) > chess.square_file(move.from_square) else "cánh hậu"
+            text += f", nhập thành {wing}"
         if move.promotion is not None:
-            text += f", phong cấp thành {self._piece_type_name(move.promotion).lower()}"
+            text += f", phong cấp thành {self._piece_type_name(move.promotion)}"
         return text
 
     @staticmethod
@@ -1479,9 +1933,23 @@ class MainWindow(QMainWindow):
             self.fen_status_label.setText(f"FEN không hợp lệ. {status}")
 
     def _log(self, message: str) -> None:
-        if message == self._last_log_message:
+        message = " ".join(str(message).split())
+        if not message or message == self._last_log_message:
             return
         self._last_log_message = message
-        self.status_output.append(message)
-        scrollbar = self.status_output.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+        marker = self._log_marker(message)
+        timestamp = time.strftime("%H:%M:%S")
+        self.status_output.appendPlainText(f"{timestamp}  {marker}  {message}")
+        self.status_output.moveCursor(QTextCursor.MoveOperation.End)
+        self.status_output.ensureCursorVisible()
+
+    @staticmethod
+    def _log_marker(message: str) -> str:
+        normalized = message.casefold()
+        if any(word in normalized for word in ("thất bại", "không ", "chưa ", "chậm", "lỗi")):
+            return "⚠"
+        if normalized.startswith(("đã ", "bạn đang ")):
+            return "✓"
+        if normalized.startswith(("đang ", "theo dõi ")):
+            return "…"
+        return "•"

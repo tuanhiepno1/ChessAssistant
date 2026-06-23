@@ -17,6 +17,7 @@
     "adaptive_max_time_ms": 6000,
     "adaptive_probe_time_ms": 300,
     "adaptive_realtime_max_time_ms": 4200,
+    "active_time_control_preset": "",
     "preset": "MEDIUM",
     "game_minutes": 10,
     "cache_enabled": true
@@ -43,5 +44,75 @@
   "browser": {
     "preferred_site": "auto",
     "web_overlay_enabled": true
+  },
+  "time_control_presets": {
+    "CHESSCOM_RAPID_10": {
+      "threads": 12,
+      "hash_mb": 4096,
+      "multipv": 4,
+      "ponder": false,
+      "skill_level": 20,
+      "contempt": 0,
+      "adaptive_time_enabled": true,
+      "time_ms": 3000,
+      "min_time_ms": 700,
+      "probe_time_ms": 300,
+      "realtime_max_time_ms": 3000,
+      "hard_max_time_ms": 6000,
+      "site": "chess.com",
+      "game_minutes": 10
+    },
+    "LICHESS_RAPID_10": {
+      "threads": 12,
+      "hash_mb": 4096,
+      "multipv": 4,
+      "ponder": false,
+      "skill_level": 20,
+      "contempt": 0,
+      "adaptive_time_enabled": true,
+      "time_ms": 3000,
+      "min_time_ms": 700,
+      "probe_time_ms": 300,
+      "realtime_max_time_ms": 3000,
+      "hard_max_time_ms": 6000,
+      "site": "lichess",
+      "game_minutes": 10
+    },
+    "RAPID": {
+      "threads": 12,
+      "hash_mb": 4096,
+      "multipv": 4,
+      "ponder": false,
+      "adaptive_time_enabled": true,
+      "time_ms": 3000,
+      "min_time_ms": 700,
+      "probe_time_ms": 300,
+      "realtime_max_time_ms": 3000,
+      "hard_max_time_ms": 6000
+    },
+    "BLITZ": {
+      "threads": 8,
+      "hash_mb": 2048,
+      "multipv": 2,
+      "ponder": false,
+      "adaptive_time_enabled": false,
+      "time_ms": 1000,
+      "min_time_ms": 400,
+      "probe_time_ms": 200,
+      "realtime_max_time_ms": 1200,
+      "hard_max_time_ms": 2000
+    },
+    "BULLET": {
+      "threads": 4,
+      "hash_mb": 512,
+      "multipv": 1,
+      "ponder": false,
+      "adaptive_time_enabled": false,
+      "time_ms": 400,
+      "min_time_ms": 200,
+      "probe_time_ms": 150,
+      "realtime_max_time_ms": 450,
+      "hard_max_time_ms": 800
+    }
   }
 }

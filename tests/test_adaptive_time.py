@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import chess
 
@@ -11,6 +12,14 @@ from engine.engine_manager import EngineManager
 
 
 class AdaptiveTimeTests(unittest.TestCase):
+    @staticmethod
+    def _engine_line(move: str = "e2e4") -> dict[str, object]:
+        return {
+            "pv_uci": [move],
+            "score_cp": 20,
+            "score_text": "+0.20",
+        }
+
     def test_quiet_opening_uses_minimum_time_bucket(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             manager = EngineManager(ConfigManager(Path(directory) / "settings.json"))
@@ -39,6 +48,72 @@ class AdaptiveTimeTests(unittest.TestCase):
 
             self.assertGreaterEqual(target, 2800)
             self.assertLessEqual(target, 4200)
+
+    def test_realtime_fixed_search_uses_single_pv(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = ConfigManager(Path(directory) / "settings.json")
+            config.set("engine.multipv", 4)
+            config.set("analysis.adaptive_time_enabled", False)
+            manager = EngineManager(config)
+            engine = Mock()
+            engine.analyze.return_value = [self._engine_line()]
+
+            with patch.object(manager, "_ensure_engine", return_value=engine):
+                manager.analyze_fen(chess.STARTING_FEN, realtime=True)
+
+            self.assertEqual(engine.analyze.call_args.kwargs["multipv"], 1)
+
+    def test_realtime_override_requests_four_pvs_for_chesscom(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = ConfigManager(Path(directory) / "settings.json")
+            config.set("analysis.adaptive_time_enabled", False)
+            manager = EngineManager(config)
+            engine = Mock()
+            engine.analyze.return_value = [self._engine_line()]
+
+            with (
+                patch.object(manager, "_ensure_engine", return_value=engine),
+                patch.object(manager, "_try_opening_book") as opening_book,
+            ):
+                manager.analyze_fen(
+                    chess.STARTING_FEN,
+                    realtime=True,
+                    multipv_override=4,
+                )
+
+            self.assertEqual(engine.analyze.call_args.kwargs["multipv"], 4)
+            opening_book.assert_not_called()
+
+    def test_realtime_adaptive_probe_uses_single_pv(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = ConfigManager(Path(directory) / "settings.json")
+            config.set("engine.multipv", 4)
+            config.set("analysis.adaptive_time_enabled", True)
+            manager = EngineManager(config)
+            engine = Mock()
+            engine.analyze.return_value = [self._engine_line()]
+
+            with patch.object(manager, "_ensure_engine", return_value=engine):
+                manager.analyze_fen(chess.STARTING_FEN, realtime=True)
+
+            self.assertTrue(engine.analyze.called)
+            self.assertTrue(
+                all(call.kwargs["multipv"] == 1 for call in engine.analyze.call_args_list)
+            )
+
+    def test_non_realtime_fixed_search_preserves_configured_multipv(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = ConfigManager(Path(directory) / "settings.json")
+            config.set("engine.multipv", 4)
+            config.set("analysis.adaptive_time_enabled", False)
+            manager = EngineManager(config)
+            engine = Mock()
+            engine.analyze.return_value = [self._engine_line()]
+
+            with patch.object(manager, "_ensure_engine", return_value=engine):
+                manager.analyze_fen(chess.STARTING_FEN, realtime=False)
+
+            self.assertEqual(engine.analyze.call_args.kwargs["multipv"], 4)
 
 
 if __name__ == "__main__":

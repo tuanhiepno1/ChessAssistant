@@ -27,6 +27,7 @@ class PositionReconciler:
         max_plies: int = 2,
         allow_resync: bool = False,
         allow_piece_increase_resync: bool = False,
+        trusted_turn_hint: bool = False,
     ) -> ReconciledPosition:
         observed = chess.Board(FenBuilder().build(pieces, side_to_move=turn_hint))
         self._require_kings(observed, source)
@@ -113,7 +114,11 @@ class PositionReconciler:
             if allow_resync:
                 resynced = observed.copy(stack=False)
                 inferred_turn = self._infer_turn_from_delta(previous, observed)
-                resynced.turn = inferred_turn if inferred_turn is not None else turn_hint
+                resynced.turn = (
+                    turn_hint
+                    if trusted_turn_hint
+                    else (inferred_turn if inferred_turn is not None else turn_hint)
+                )
                 resynced.castling_rights = chess.BB_EMPTY
                 resynced.ep_square = None
                 resynced.halfmove_clock = 0
@@ -161,11 +166,32 @@ class PositionReconciler:
         for turn in (turn_hint, not turn_hint):
             candidate = board.copy(stack=False)
             candidate.turn = turn
+            candidate.castling_rights = PositionReconciler._plausible_castling_rights(candidate)
             if candidate.is_valid():
                 candidates.append(candidate)
         if not candidates:
             raise RuntimeError("Thế cờ nhận diện không hợp lệ với cả hai lượt đi.")
         return candidates[0]
+
+    @staticmethod
+    def _plausible_castling_rights(board: chess.Board) -> int:
+        """Keep castling trackable when vision starts after the opening.
+
+        A piece-only snapshot cannot prove that a king or rook has never moved.
+        Treat pieces still on their original squares as plausible rights; later
+        legal-move reconciliation removes those rights as soon as either moves.
+        """
+        rights = chess.BB_EMPTY
+        for color, king_square, rook_squares in (
+            (chess.WHITE, chess.E1, (chess.A1, chess.H1)),
+            (chess.BLACK, chess.E8, (chess.A8, chess.H8)),
+        ):
+            if board.piece_at(king_square) != chess.Piece(chess.KING, color):
+                continue
+            for rook_square in rook_squares:
+                if board.piece_at(rook_square) == chess.Piece(chess.ROOK, color):
+                    rights |= chess.BB_SQUARES[rook_square]
+        return rights
 
     @staticmethod
     def _find_successor(

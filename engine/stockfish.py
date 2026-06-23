@@ -24,6 +24,7 @@ class EngineLine:
     tbhits: int | None
     hashfull: int | None
     pv: list[str]
+    score_cp: int | None = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ class UciEngine:
         self._engine: subprocess.Popen[str] | None = None
         self._stdout_queue: queue.Queue[str | None] = queue.Queue()
         self._stdout_thread: threading.Thread | None = None
+        self._stdin_lock = threading.Lock()
 
     @property
     def is_running(self) -> bool:
@@ -178,11 +180,19 @@ class UciEngine:
                 process.stdout.close()
         self._stdout_thread = None
 
+    def stop(self) -> None:
+        """Ask an active search to return its best move immediately."""
+        if not self.is_running:
+            return
+        with suppress(Exception):
+            self._send("stop")
+
     def _send(self, command: str) -> None:
-        if self._engine is None or self._engine.stdin is None:
-            raise RuntimeError("Stockfish chưa sẵn sàng.")
-        self._engine.stdin.write(command + "\n")
-        self._engine.stdin.flush()
+        with self._stdin_lock:
+            if self._engine is None or self._engine.stdin is None:
+                raise RuntimeError("Stockfish chưa sẵn sàng.")
+            self._engine.stdin.write(command + "\n")
+            self._engine.stdin.flush()
 
     def _read_line(self, timeout_seconds: float = 5.0) -> str:
         if self._engine is None:

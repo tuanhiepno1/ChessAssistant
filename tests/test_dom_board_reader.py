@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
 import chess
 
 from vision.dom_board_reader import DomBoardReader, DomUnavailableError
+from chess_tools.fen_builder import SquarePiece
+from engine.stockfish import EngineLine
 from ui.main_window import MainWindow, RealtimeWorker
 
 
@@ -71,13 +74,14 @@ class DomBoardReaderPageSelectionTests(unittest.TestCase):
 
         self.assertEqual(selected, "https://lichess.org/abcdefgh")
 
-    def test_explicit_lichess_never_falls_back_to_chesscom(self) -> None:
+    def test_missing_preferred_site_uses_available_supported_tab(self) -> None:
         pages = [
             {"type": "page", "url": "https://www.chess.com/play/computer", "title": "Chess.com"},
         ]
 
-        with self.assertRaises(DomUnavailableError):
-            self._reader_url(pages, preferred_site="lichess")
+        selected = self._reader_url(pages, preferred_site="lichess")
+
+        self.assertEqual(selected, "https://www.chess.com/play/computer")
 
     def test_browser_target_id_keeps_reader_on_the_opened_lichess_tab(self) -> None:
         pages = [
@@ -121,6 +125,19 @@ class DomBoardReaderPageSelectionTests(unittest.TestCase):
 
 
 class DomBoardReaderTurnTests(unittest.TestCase):
+    def test_reader_scores_main_board_and_scopes_chesscom_pieces_to_it(self) -> None:
+        source = DomBoardReader.read.__code__.co_consts
+        script = next(
+            value
+            for value in source
+            if isinstance(value, str) and "const findBoard = () =>" in value
+        )
+
+        self.assertIn("const scoreBoard = (el) =>", script)
+        self.assertIn("mini-board|miniboard|thumbnail|preview", script)
+        self.assertIn("boardEl.querySelectorAll('.piece')", script)
+        self.assertIn("side < 140", script)
+
     def test_bottom_clock_respects_white_orientation(self) -> None:
         turn, reliable, _ = DomBoardReader._resolve_turn(
             {"activeClockPosition": "bottom", "blackAtBottom": False}, 0
@@ -207,6 +224,18 @@ class DomBoardReaderTurnTests(unittest.TestCase):
 
         self.assertEqual(fen, board.fen())
 
+    def test_lichess_unicode_annotation_is_removed_from_san(self) -> None:
+        board = chess.Board()
+        for san in ("e4", "e5", "Nf3", "Nc6", "Bb5", "a6"):
+            board.push_san(san)
+
+        fen = DomBoardReader._moves_to_exact_fen(
+            ["e4", "e5", "Nf3", "Nc6", "Bb5", "a6½?"],
+            board,
+        )
+
+        self.assertEqual(fen, board.fen())
+
     def test_chessbase_internal_fen_must_match_dom_pieces(self) -> None:
         board = chess.Board()
         board.push_san("e4")
@@ -221,6 +250,57 @@ class DomBoardReaderTurnTests(unittest.TestCase):
 
 
 class RealtimeWorkerSchedulingTests(unittest.TestCase):
+    def test_chesscom_and_lichess_request_four_candidate_moves(self) -> None:
+        self.assertEqual(RealtimeWorker._site_multipv("chess.com"), 4)
+        self.assertEqual(RealtimeWorker._site_multipv("chesscom"), 4)
+        self.assertEqual(RealtimeWorker._site_multipv("lichess"), 4)
+        self.assertEqual(RealtimeWorker._site_multipv("chessbase"), 1)
+        self.assertEqual(RealtimeWorker._site_multipv("lichess", 2), 2)
+        self.assertEqual(RealtimeWorker._site_multipv("chess.com", 1), 1)
+
+    def test_dom_monitor_interrupts_analysis_when_board_changes(self) -> None:
+        cancelled = threading.Event()
+        manager = Mock()
+        manager.cancel_analysis.side_effect = cancelled.set
+        expected = object()
+
+        def analyze(*_args: object, **_kwargs: object) -> object:
+            self.assertTrue(cancelled.wait(1.0))
+            return expected
+
+        manager.analyze_fen.side_effect = analyze
+        reader = Mock()
+        reader.read.return_value = Mock(
+            pieces=[SquarePiece(chess.E4, "white_pawn")]
+        )
+        worker = RealtimeWorker(
+            config=Mock(),
+            engine_manager=manager,
+            tracker=Mock(),
+            template_recognizer=Mock(),
+            side_to_move=chess.WHITE,
+            last_fen="",
+        )
+
+        result, changed = worker._analyze_with_dom_monitor(
+            chess.STARTING_FEN,
+            reader,
+            initial_signature=(),
+        )
+
+        self.assertIs(result, expected)
+        self.assertTrue(changed)
+        manager.cancel_analysis.assert_called_once_with()
+
+    def test_image_fallback_status_explains_dom_failure(self) -> None:
+        status = RealtimeWorker._image_status(
+            "YOLO đọc 30 quân.",
+            "Chưa tìm thấy trang cờ vua.",
+        )
+
+        self.assertIn("Fallback hình ảnh vì DOM", status)
+        self.assertIn("Chưa tìm thấy trang cờ vua", status)
+
     def test_reanalyzes_same_observed_fen_when_previous_result_was_discarded(self) -> None:
         self.assertTrue(
             RealtimeWorker._should_analyze("fen-new", "fen-new", False, False)
@@ -269,6 +349,7 @@ class RealtimeWorkerSchedulingTests(unittest.TestCase):
             chess.STARTING_FEN,
             force=True,
             realtime=False,
+            multipv_override=1,
         )
 
     def test_ui_keeps_best_move_when_polling_the_same_position(self) -> None:
@@ -284,6 +365,44 @@ class RealtimeWorkerSchedulingTests(unittest.TestCase):
         )
 
 
+class CandidateRoleTests(unittest.TestCase):
+    @staticmethod
+    def _line(move: str, score_cp: int) -> EngineLine:
+        return EngineLine(
+            move_uci=move,
+            move_san=move,
+            score=f"{score_cp / 100:+.2f}",
+            depth=18,
+            seldepth=22,
+            nodes=1000,
+            tbhits=0,
+            hashfull=1,
+            pv=[move],
+            score_cp=score_cp,
+        )
+
+    def test_natural_central_move_can_be_the_human_choice(self) -> None:
+        lines = [self._line("a2a4", 30), self._line("e2e4", 15)]
+
+        selected = MainWindow._human_candidate_index(chess.Board(), lines)
+
+        self.assertEqual(selected, 2)
+
+    def test_large_evaluation_loss_keeps_engine_move_as_human_choice(self) -> None:
+        lines = [self._line("e2e4", 80), self._line("g1f3", 0)]
+
+        selected = MainWindow._human_candidate_index(chess.Board(), lines)
+
+        self.assertEqual(selected, 1)
+
+    def test_single_bullet_line_has_no_separate_practical_choice(self) -> None:
+        selected = MainWindow._human_candidate_index(
+            chess.Board(), [self._line("e2e4", 30)]
+        )
+
+        self.assertEqual(selected, 0)
+
+
 class ChessBaseOverlayTests(unittest.TestCase):
     def test_chessbase_overlay_uses_native_board_coordinates(self) -> None:
         script = DomBoardReader._chessbase_native_overlay_script("a1", "h8")
@@ -297,6 +416,52 @@ class ChessBaseOverlayTests(unittest.TestCase):
 
 
 class WebOverlayTests(unittest.TestCase):
+    def test_overlay_renders_four_ranked_colored_moves(self) -> None:
+        moves = [
+            {"uci": "e2e4", "score": "+0.35", "rank": 1, "color": "#4ade80", "role": "E"},
+            {"uci": "d2d4", "score": "+0.28", "rank": 2, "color": "#38bdf8", "role": "T"},
+            {"uci": "g1f3", "score": "+0.20", "rank": 3, "color": "#facc15"},
+            {"uci": "c2c4", "score": "+0.12", "rank": 4, "color": "#fb7185"},
+        ]
+
+        script = DomBoardReader._moves_overlay_script(moves, "white")
+
+        self.assertIn('"uci": "c2c4"', script)
+        self.assertIn("badge.textContent", script)
+        self.assertIn("arrowLine", script)
+        self.assertIn("arrowHead", script)
+        self.assertIn("midBadge.textContent", script)
+        self.assertIn("fromMark.style.borderStyle = 'dashed'", script)
+        self.assertIn('"role": "E"', script)
+        self.assertIn('"role": "T"', script)
+        self.assertIn("move.role ? String(move.role)", script)
+        self.assertIn("const rolePriority", script)
+        self.assertIn("const renderMoves", script)
+        self.assertIn("hasRole ? 50 + priority", script)
+        self.assertIn("setProperty('z-index', '2147483647', 'important')", script)
+        self.assertIn("moveCount: moves.length", script)
+
+    def test_overlay_connects_two_moves_from_the_same_piece_with_arrows(self) -> None:
+        script = DomBoardReader._moves_overlay_script(
+            [
+                {"uci": "g1f3", "score": "+0.30", "rank": 1, "color": "#4ade80"},
+                {"uci": "g1h3", "score": "+0.10", "rank": 2, "color": "#38bdf8"},
+            ],
+            "white",
+        )
+
+        self.assertIn('"uci": "g1f3"', script)
+        self.assertIn('"uci": "g1h3"', script)
+        self.assertIn("const lineStart", script)
+        self.assertIn("const tip", script)
+
+    def test_overlay_tracks_board_resize_and_fullscreen(self) -> None:
+        script = DomBoardReader._overlay_script("e2", "e4", "white", "e4")
+
+        self.assertIn("new ResizeObserver(updateOverlay)", script)
+        self.assertIn("fullscreenchange", script)
+        self.assertIn("__chessAssistantOverlayCleanup", script)
+
     def test_overlay_falls_back_to_selected_black_perspective(self) -> None:
         script = DomBoardReader._overlay_script("e7", "e5", "black", "e5")
 
@@ -317,6 +482,7 @@ class WebOverlayTests(unittest.TestCase):
 
         expression = reader._evaluate.call_args.args[1]
         self.assertIn("chess-assistant-web-overlay", expression)
+        self.assertIn("__chessAssistantOverlayCleanup", expression)
         self.assertIn("undoAttributes", expression)
 
 

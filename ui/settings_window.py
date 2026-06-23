@@ -38,6 +38,7 @@ class SettingsWindow(QDialog):
         tabs = QTabWidget()
         tabs.addTab(self._engine_tab(), "Stockfish")
         tabs.addTab(self._analysis_tab(), "Phân tích")
+        tabs.addTab(self._time_control_presets_tab(), "Nhịp độ")
         tabs.addTab(self._book_tab(), "Khai cuộc")
         tabs.addTab(self._tablebase_tab(), "Tàn cuộc")
         tabs.addTab(self._vision_tab(), "Nhận diện")
@@ -154,6 +155,52 @@ class SettingsWindow(QDialog):
         form.addRow("Thời gian kiểm tra", self.book_verify_time)
         return tab
 
+    def _time_control_presets_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        preset_tabs = QTabWidget()
+        self.time_control_fields: dict[str, dict[str, QWidget]] = {}
+        for name, label in {
+            "RAPID": "Rapid",
+            "BLITZ": "Blitz",
+            "BULLET": "Bullet",
+        }.items():
+            panel = QWidget()
+            form = QFormLayout(panel)
+            fields: dict[str, QWidget] = {}
+
+            threads = QSpinBox()
+            threads.setRange(1, 64)
+            fields["threads"] = threads
+            hash_mb = QSpinBox()
+            hash_mb.setRange(16, 65536)
+            hash_mb.setSuffix(" MB")
+            fields["hash_mb"] = hash_mb
+            multipv = QSpinBox()
+            multipv.setRange(1, 4)
+            multipv.setSuffix(" phương án")
+            fields["multipv"] = multipv
+            fields["adaptive_time_enabled"] = QCheckBox()
+            for key in ("time_ms", "min_time_ms", "probe_time_ms", "realtime_max_time_ms", "hard_max_time_ms"):
+                spin = QSpinBox()
+                spin.setRange(100, 120000)
+                spin.setSuffix(" ms")
+                fields[key] = spin
+
+            form.addRow("Luồng khuyến nghị", fields["threads"])
+            form.addRow("Hash khuyến nghị", fields["hash_mb"])
+            form.addRow("Số phương án", fields["multipv"])
+            form.addRow("Thời gian thông minh", fields["adaptive_time_enabled"])
+            form.addRow("Thời gian cố định", fields["time_ms"])
+            form.addRow("Tối thiểu", fields["min_time_ms"])
+            form.addRow("Thời gian thăm dò", fields["probe_time_ms"])
+            form.addRow("Trần realtime", fields["realtime_max_time_ms"])
+            form.addRow("Trần cứng", fields["hard_max_time_ms"])
+            self.time_control_fields[name] = fields
+            preset_tabs.addTab(panel, label)
+        layout.addWidget(preset_tabs)
+        return tab
+
     def _tablebase_tab(self) -> QWidget:
         tab = QWidget()
         form = QFormLayout(tab)
@@ -237,6 +284,7 @@ class SettingsWindow(QDialog):
         self.adaptive_realtime_max_time_ms.setValue(int(self.config.get("analysis.adaptive_realtime_max_time_ms", 4200)))
         self.adaptive_probe_time_ms.setValue(int(self.config.get("analysis.adaptive_probe_time_ms", 500)))
         self.cache_enabled.setChecked(bool(self.config.get("analysis.cache_enabled", True)))
+        self._load_time_control_presets()
         self.book_enabled.setChecked(bool(self.config.get("book.enabled", False)))
         self._set_line_text(self.book_path, str(self.config.get("book.path", "")))
         self.prefer_book.setChecked(bool(self.config.get("book.prefer_book", True)))
@@ -269,6 +317,7 @@ class SettingsWindow(QDialog):
         self.config.set("analysis.adaptive_realtime_max_time_ms", self.adaptive_realtime_max_time_ms.value())
         self.config.set("analysis.adaptive_probe_time_ms", self.adaptive_probe_time_ms.value())
         self.config.set("analysis.cache_enabled", self.cache_enabled.isChecked())
+        self._save_time_control_presets()
         self.config.set("book.enabled", self.book_enabled.isChecked())
         self.config.set("book.path", self._line_text(self.book_path))
         self.config.set("book.prefer_book", self.prefer_book.isChecked())
@@ -291,6 +340,41 @@ class SettingsWindow(QDialog):
             self.config.apply_profile(mode)
         self.config.save()
         self.accept()
+
+    def _load_time_control_presets(self) -> None:
+        fallbacks = {
+            "threads": self.config.get("engine.threads", 1),
+            "hash_mb": self.config.get("engine.hash_mb", 128),
+            "multipv": self.config.get("engine.multipv", 1),
+            "time_ms": self.config.get("analysis.time_ms", 1000),
+            "min_time_ms": self.config.get("analysis.adaptive_min_time_ms", 700),
+            "probe_time_ms": self.config.get("analysis.adaptive_probe_time_ms", 300),
+            "realtime_max_time_ms": self.config.get("analysis.adaptive_realtime_max_time_ms", 4200),
+            "hard_max_time_ms": self.config.get("analysis.adaptive_max_time_ms", 6000),
+        }
+        for name, fields in self.time_control_fields.items():
+            preset = self.config.get(f"time_control_presets.{name}", {})
+            if not isinstance(preset, dict):
+                preset = {}
+            for key, fallback in fallbacks.items():
+                field = fields[key]
+                assert isinstance(field, QSpinBox)
+                field.setValue(int(preset.get(key, fallback)))
+            adaptive = fields["adaptive_time_enabled"]
+            assert isinstance(adaptive, QCheckBox)
+            adaptive.setChecked(bool(preset.get("adaptive_time_enabled", False)))
+
+    def _save_time_control_presets(self) -> None:
+        for name, fields in self.time_control_fields.items():
+            values: dict[str, object] = {}
+            for key in ("threads", "hash_mb", "multipv", "time_ms", "min_time_ms", "probe_time_ms", "realtime_max_time_ms", "hard_max_time_ms"):
+                field = fields[key]
+                assert isinstance(field, QSpinBox)
+                values[key] = field.value()
+            adaptive = fields["adaptive_time_enabled"]
+            assert isinstance(adaptive, QCheckBox)
+            values["adaptive_time_enabled"] = adaptive.isChecked()
+            self.config.update_time_control_preset(name, values)
 
     def _toggle_engine_advanced(self, automatic: bool) -> None:
         self.advanced_engine.setVisible(True)
