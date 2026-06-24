@@ -322,7 +322,13 @@ class DomBoardReader:
           '.move-text-component'
         ])
       : (location.hostname.includes('play.chessclub.com')
-        ? firstMoveNodes(['[data-san]', '.move-list .move', '.moves .move', 'move'])
+        ? firstMoveNodes([
+            'table:has(.elapsed-time-bar) tr td[rowspan="2"] > div',
+            '[data-san]',
+            '.move-list .move',
+            '.moves .move',
+            'move'
+          ])
         : firstMoveNodes(['kwdb', 'move'])));
   const rawMoves = moveNodes
     .map((el) => (el.getAttribute?.('data-san') || el.textContent || '').trim())
@@ -342,7 +348,9 @@ class DomBoardReader:
       ? 'wc-chess-clock, .clock-component, [class*="clock"]'
       : (location.hostname.includes('play.chessbase.com')
         ? '[class*="clock"], [id*="clock"], [id*="Clock"]'
-        : '[class*="clock"], [id*="clock"], [data-testid*="clock"]'));
+        : (location.hostname.includes('play.chessclub.com')
+          ? 'p, [role="timer"]'
+          : '[class*="clock"], [id*="clock"], [data-testid*="clock"]')));
   const clockCandidates = Array.from(document.querySelectorAll(clockSelector))
     .map((el) => {
       const rect = el.getBoundingClientRect();
@@ -517,7 +525,7 @@ class DomBoardReader:
         )
 
     def show_moves(self, moves: list[dict[str, object]], perspective: str) -> None:
-        valid_moves = [move for move in moves[:4] if len(str(move.get("uci", ""))) >= 4]
+        valid_moves = [move for move in moves[:3] if len(str(move.get("uci", ""))) >= 4]
         if not valid_moves:
             return
         page = self._find_chess_page()
@@ -789,7 +797,7 @@ class DomBoardReader:
 
     @staticmethod
     def _moves_overlay_script(moves: list[dict[str, object]], perspective: str) -> str:
-        payload = {"moves": moves[:4], "perspective": perspective}
+        payload = {"moves": moves[:3], "perspective": perspective}
         data = json.dumps(payload, ensure_ascii=False)
         return f"""
 (() => {{

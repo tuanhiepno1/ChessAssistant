@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -54,23 +55,14 @@ class SettingsWindow(QDialog):
     def _engine_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        self.auto_tune = QCheckBox("Lưu các giá trị vào chế độ đang chọn")
-        self.performance_mode = QComboBox()
-        self.performance_mode.addItem("Yếu", "WEAK")
-        self.performance_mode.addItem("Trung bình", "MEDIUM")
-        self.performance_mode.addItem("Mạnh nhất", "STRONG")
         self.auto_summary = QLabel()
         self.auto_summary.setWordWrap(True)
         self.auto_summary.setStyleSheet(
             "padding: 8px; color: #bbf7d0; background: #052e16; border: 1px solid #166534;"
         )
-        layout.addWidget(self.auto_tune)
-        layout.addWidget(self.performance_mode)
         layout.addWidget(self.auto_summary)
-        self.performance_mode.currentIndexChanged.connect(self._refresh_auto_summary)
-        self.performance_mode.currentIndexChanged.connect(self._load_selected_profile)
 
-        self.advanced_engine = QGroupBox("Thiết lập nâng cao")
+        self.advanced_engine = QGroupBox("Cấu hình mặc định mạnh")
         form = QFormLayout(self.advanced_engine)
         self.stockfish_path = self._path_picker(file_mode=True)
         self.threads = QSpinBox()
@@ -158,6 +150,18 @@ class SettingsWindow(QDialog):
     def _time_control_presets_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        explanation = QLabel(
+            "Mỗi preset lưu cấu hình độc lập. Khi bật Thời gian thông minh, "
+            "Stockfish dùng Tối thiểu → Trần realtime; Thời gian cố định chỉ dùng khi tắt chế độ này.\n"
+            "Ponder hit dùng kết quả đã tính trước. Ponder miss hiện gợi ý nhanh trước, "
+            "sau đó mới tính kết quả đầy đủ."
+        )
+        explanation.setWordWrap(True)
+        explanation.setStyleSheet(
+            "padding: 8px; color: #bfdbfe; background: #172554; "
+            "border: 1px solid #1d4ed8; border-radius: 5px;"
+        )
+        layout.addWidget(explanation)
         preset_tabs = QTabWidget()
         self.time_control_fields: dict[str, dict[str, QWidget]] = {}
         for name, label in {
@@ -177,27 +181,57 @@ class SettingsWindow(QDialog):
             hash_mb.setSuffix(" MB")
             fields["hash_mb"] = hash_mb
             multipv = QSpinBox()
-            multipv.setRange(1, 4)
+            multipv.setRange(1, 3)
             multipv.setSuffix(" phương án")
             fields["multipv"] = multipv
+            fields["ponder"] = QCheckBox()
             fields["adaptive_time_enabled"] = QCheckBox()
             for key in ("time_ms", "min_time_ms", "probe_time_ms", "realtime_max_time_ms", "hard_max_time_ms"):
                 spin = QSpinBox()
                 spin.setRange(100, 120000)
                 spin.setSuffix(" ms")
                 fields[key] = spin
+            for key in (
+                "ponder_max_time_ms",
+                "ponder_hit_settle_ms",
+                "ponder_miss_quick_time_ms",
+                "ponder_prediction_time_ms",
+                "ponder_completion_time_ms",
+                "ponder_stop_timeout_ms",
+                "ponder_refinement_time_ms",
+            ):
+                spin = QSpinBox()
+                spin.setRange(0, 120000)
+                spin.setSuffix(" ms")
+                fields[key] = spin
+            ponder_ready_depth = QSpinBox()
+            ponder_ready_depth.setRange(1, 50)
+            ponder_ready_depth.setSuffix(" ply")
+            fields["ponder_ready_depth"] = ponder_ready_depth
 
-            form.addRow("Luồng khuyến nghị", fields["threads"])
-            form.addRow("Hash khuyến nghị", fields["hash_mb"])
-            form.addRow("Số phương án", fields["multipv"])
-            form.addRow("Thời gian thông minh", fields["adaptive_time_enabled"])
-            form.addRow("Thời gian cố định", fields["time_ms"])
-            form.addRow("Tối thiểu", fields["min_time_ms"])
-            form.addRow("Thời gian thăm dò", fields["probe_time_ms"])
-            form.addRow("Trần realtime", fields["realtime_max_time_ms"])
-            form.addRow("Trần cứng", fields["hard_max_time_ms"])
+            form.addRow("Số luồng Stockfish", fields["threads"])
+            form.addRow("Bộ nhớ Hash", fields["hash_mb"])
+            form.addRow("Số phương án MultiPV", fields["multipv"])
+            form.addRow("Bật tính trước Ponder", fields["ponder"])
+            form.addRow("Bật thời gian thông minh", fields["adaptive_time_enabled"])
+            form.addRow("Thời gian cố định (khi tắt thông minh)", fields["time_ms"])
+            form.addRow("Thông minh: thời gian tối thiểu", fields["min_time_ms"])
+            form.addRow("Thông minh: thăm dò ban đầu", fields["probe_time_ms"])
+            form.addRow("Thông minh: trần khi theo dõi ván", fields["realtime_max_time_ms"])
+            form.addRow("Thông minh: trần cứng khi tính tay", fields["hard_max_time_ms"])
+            form.addRow("Ponder: thời gian chạy tối đa", fields["ponder_max_time_ms"])
+            form.addRow("Ponder hit: chờ Stockfish ổn định", fields["ponder_hit_settle_ms"])
+            form.addRow("Ponder miss: gợi ý nhanh đầu tiên", fields["ponder_miss_quick_time_ms"])
+            form.addRow("Ponder: dự đoán nước đối thủ", fields["ponder_prediction_time_ms"])
+            form.addRow("Ponder hit thiếu PV: thời gian bổ sung", fields["ponder_completion_time_ms"])
+            form.addRow("Ponder miss: chờ dừng tìm kiếm cũ", fields["ponder_stop_timeout_ms"])
+            form.addRow("Ponder miss: tinh chỉnh nền (0 = tắt)", fields["ponder_refinement_time_ms"])
+            form.addRow("Ponder: độ sâu tối thiểu để báo sẵn sàng", fields["ponder_ready_depth"])
             self.time_control_fields[name] = fields
-            preset_tabs.addTab(panel, label)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(panel)
+            preset_tabs.addTab(scroll, label)
         layout.addWidget(preset_tabs)
         return tab
 
@@ -259,18 +293,15 @@ class SettingsWindow(QDialog):
 
     def _load(self) -> None:
         self._set_line_text(self.stockfish_path, str(self.config.get("engine.stockfish_path", "")))
-        self.auto_tune.setChecked(True)
-        preset = str(self.config.get("analysis.preset", "STRONG"))
-        if preset not in {"WEAK", "MEDIUM", "STRONG"}:
-            preset = "STRONG"
-        mode_index = self.performance_mode.findData(preset)
-        self.performance_mode.setCurrentIndex(max(mode_index, 0))
-        self.threads.setValue(int(self.config.get("engine.threads", 16)))
-        self.hash_mb.setValue(int(self.config.get("engine.hash_mb", 8192)))
-        self.multipv.setValue(int(self.config.get("engine.multipv", 3)))
-        self.skill_level.setValue(int(self.config.get("engine.skill_level", 20)))
-        self.time_ms.setValue(int(self.config.get("analysis.time_ms", 1000)))
-        self.adaptive_time_enabled.setChecked(bool(self.config.get("analysis.adaptive_time_enabled", True)))
+        default = self.config.get("default_config", {})
+        if not isinstance(default, dict):
+            default = {}
+        self.threads.setValue(int(default.get("threads", 16)))
+        self.hash_mb.setValue(int(default.get("hash_mb", 8000)))
+        self.multipv.setValue(int(default.get("multipv", 1)))
+        self.skill_level.setValue(int(default.get("skill_level", 20)))
+        self.time_ms.setValue(int(default.get("time_ms", 4500)))
+        self.adaptive_time_enabled.setChecked(bool(default.get("adaptive_time_enabled", True)))
         adaptive = self.adaptive_time_enabled.isChecked()
         for widget in (
             self.adaptive_min_time_ms,
@@ -279,10 +310,10 @@ class SettingsWindow(QDialog):
             self.adaptive_probe_time_ms,
         ):
             widget.setEnabled(adaptive)
-        self.adaptive_min_time_ms.setValue(int(self.config.get("analysis.adaptive_min_time_ms", 500)))
-        self.adaptive_max_time_ms.setValue(int(self.config.get("analysis.adaptive_max_time_ms", 10000)))
-        self.adaptive_realtime_max_time_ms.setValue(int(self.config.get("analysis.adaptive_realtime_max_time_ms", 4200)))
-        self.adaptive_probe_time_ms.setValue(int(self.config.get("analysis.adaptive_probe_time_ms", 500)))
+        self.adaptive_min_time_ms.setValue(int(default.get("min_time_ms", 700)))
+        self.adaptive_max_time_ms.setValue(int(default.get("hard_max_time_ms", 6000)))
+        self.adaptive_realtime_max_time_ms.setValue(int(default.get("realtime_max_time_ms", 4200)))
+        self.adaptive_probe_time_ms.setValue(int(default.get("probe_time_ms", 300)))
         self.cache_enabled.setChecked(bool(self.config.get("analysis.cache_enabled", True)))
         self._load_time_control_presets()
         self.book_enabled.setChecked(bool(self.config.get("book.enabled", False)))
@@ -300,22 +331,25 @@ class SettingsWindow(QDialog):
         index = self.perspective.findData(perspective)
         self.perspective.setCurrentIndex(max(index, 0))
         self.advanced_engine.setVisible(True)
-        self._load_selected_profile()
 
     def _save(self) -> None:
-        self.config.set("engine.auto_tune", False)
+        active_preset = str(
+            self.config.get("analysis.active_time_control_preset", "")
+        ).upper()
         self.config.set("engine.stockfish_path", self._line_text(self.stockfish_path))
-        self.config.set("engine.threads", self.threads.value())
-        self.config.set("engine.hash_mb", self.hash_mb.value())
-        self.config.set("engine.ponder", False)
-        self.config.set("engine.multipv", self.multipv.value())
-        self.config.set("engine.skill_level", self.skill_level.value())
-        self.config.set("analysis.time_ms", self.time_ms.value())
-        self.config.set("analysis.adaptive_time_enabled", self.adaptive_time_enabled.isChecked())
-        self.config.set("analysis.adaptive_min_time_ms", self.adaptive_min_time_ms.value())
-        self.config.set("analysis.adaptive_max_time_ms", self.adaptive_max_time_ms.value())
-        self.config.set("analysis.adaptive_realtime_max_time_ms", self.adaptive_realtime_max_time_ms.value())
-        self.config.set("analysis.adaptive_probe_time_ms", self.adaptive_probe_time_ms.value())
+        self.config.update_default_config({
+            "threads": self.threads.value(),
+            "hash_mb": self.hash_mb.value(),
+            "multipv": self.multipv.value(),
+            "ponder": False,
+            "skill_level": self.skill_level.value(),
+            "adaptive_time_enabled": self.adaptive_time_enabled.isChecked(),
+            "time_ms": self.time_ms.value(),
+            "min_time_ms": self.adaptive_min_time_ms.value(),
+            "hard_max_time_ms": self.adaptive_max_time_ms.value(),
+            "realtime_max_time_ms": self.adaptive_realtime_max_time_ms.value(),
+            "probe_time_ms": self.adaptive_probe_time_ms.value(),
+        })
         self.config.set("analysis.cache_enabled", self.cache_enabled.isChecked())
         self._save_time_control_presets()
         self.config.set("book.enabled", self.book_enabled.isChecked())
@@ -330,14 +364,10 @@ class SettingsWindow(QDialog):
         self.config.set("vision.yolo_model_path", self._line_text(self.yolo_model_path))
         self.config.set("vision.confidence_threshold", self.confidence.value())
         self.config.set("vision.perspective", self.perspective.currentData())
-        mode = str(self.performance_mode.currentData())
-        if self.auto_tune.isChecked() and mode in {"WEAK", "MEDIUM", "STRONG"}:
-            self.config.set(f"profiles.{mode}.threads", self.threads.value())
-            self.config.set(f"profiles.{mode}.hash_mb", self.hash_mb.value())
-            self.config.set(f"profiles.{mode}.multipv", self.multipv.value())
-            self.config.set(f"profiles.{mode}.time_ms", self.time_ms.value())
-            self.config.set(f"profiles.{mode}.ponder", False)
-            self.config.apply_profile(mode)
+        if active_preset in {"RAPID", "BLITZ", "BULLET"}:
+            self.config.apply_time_control_preset(active_preset)
+        else:
+            self.config.apply_default_config()
         self.config.save()
         self.accept()
 
@@ -351,6 +381,14 @@ class SettingsWindow(QDialog):
             "probe_time_ms": self.config.get("analysis.adaptive_probe_time_ms", 300),
             "realtime_max_time_ms": self.config.get("analysis.adaptive_realtime_max_time_ms", 4200),
             "hard_max_time_ms": self.config.get("analysis.adaptive_max_time_ms", 6000),
+            "ponder_max_time_ms": self.config.get("analysis.ponder_max_time_ms", 10000),
+            "ponder_hit_settle_ms": self.config.get("analysis.ponder_hit_settle_ms", 25),
+            "ponder_miss_quick_time_ms": self.config.get("analysis.ponder_miss_quick_time_ms", 650),
+            "ponder_prediction_time_ms": self.config.get("analysis.ponder_prediction_time_ms", 200),
+            "ponder_completion_time_ms": self.config.get("analysis.ponder_completion_time_ms", 650),
+            "ponder_stop_timeout_ms": self.config.get("analysis.ponder_stop_timeout_ms", 200),
+            "ponder_refinement_time_ms": self.config.get("analysis.ponder_refinement_time_ms", 2000),
+            "ponder_ready_depth": self.config.get("analysis.ponder_ready_depth", 8),
         }
         for name, fields in self.time_control_fields.items():
             preset = self.config.get(f"time_control_presets.{name}", {})
@@ -363,49 +401,37 @@ class SettingsWindow(QDialog):
             adaptive = fields["adaptive_time_enabled"]
             assert isinstance(adaptive, QCheckBox)
             adaptive.setChecked(bool(preset.get("adaptive_time_enabled", False)))
+            ponder = fields["ponder"]
+            assert isinstance(ponder, QCheckBox)
+            ponder.setChecked(bool(preset.get("ponder", False)))
 
     def _save_time_control_presets(self) -> None:
         for name, fields in self.time_control_fields.items():
             values: dict[str, object] = {}
-            for key in ("threads", "hash_mb", "multipv", "time_ms", "min_time_ms", "probe_time_ms", "realtime_max_time_ms", "hard_max_time_ms"):
+            for key in (
+                "threads", "hash_mb", "multipv", "time_ms", "min_time_ms",
+                "probe_time_ms", "realtime_max_time_ms", "hard_max_time_ms",
+                "ponder_max_time_ms", "ponder_hit_settle_ms",
+                "ponder_miss_quick_time_ms", "ponder_prediction_time_ms",
+                "ponder_completion_time_ms", "ponder_ready_depth",
+                "ponder_stop_timeout_ms", "ponder_refinement_time_ms",
+            ):
                 field = fields[key]
                 assert isinstance(field, QSpinBox)
                 values[key] = field.value()
             adaptive = fields["adaptive_time_enabled"]
             assert isinstance(adaptive, QCheckBox)
             values["adaptive_time_enabled"] = adaptive.isChecked()
+            ponder = fields["ponder"]
+            assert isinstance(ponder, QCheckBox)
+            values["ponder"] = ponder.isChecked()
             self.config.update_time_control_preset(name, values)
 
-    def _toggle_engine_advanced(self, automatic: bool) -> None:
-        self.advanced_engine.setVisible(True)
-        self.performance_mode.setEnabled(True)
-
     def _refresh_auto_summary(self) -> None:
-        mode = str(self.performance_mode.currentData()) if hasattr(self, "performance_mode") else "STRONG"
-        if mode == "WEAK":
-            recommendation = self.hardware.recommend_weak()
-            description = "nhẹ máy, phản hồi nhanh"
-        elif mode == "MEDIUM":
-            recommendation = self.hardware.recommend_medium()
-            description = "cân bằng tốc độ và độ sâu"
-        else:
-            recommendation = self.hardware.recommend_max_strength()
-            description = "dùng tối đa tài nguyên khuyến nghị"
+        recommendation = self.hardware.recommend_max_strength()
         self.auto_summary.setText(
             f"{self.hardware.cpu_name.strip()} • {self.hardware.physical_cores} nhân/"
             f"{self.hardware.logical_processors} luồng • RAM {self.hardware.ram_total_gb:.1f} GB\n"
             f"{recommendation.threads} luồng Stockfish, bộ nhớ băm {recommendation.hash_mb} MB, "
-            f"{recommendation.time_ms / 1000:.1f} giây mỗi nước — {description}."
+            f"{recommendation.time_ms / 1000:.1f} giây mỗi nước — cấu hình mặc định mạnh."
         )
-
-    def _load_selected_profile(self) -> None:
-        if not hasattr(self, "threads"):
-            return
-        mode = str(self.performance_mode.currentData())
-        profile = self.config.get(f"profiles.{mode}", {})
-        if not isinstance(profile, dict):
-            return
-        self.threads.setValue(int(profile.get("threads", self.threads.value())))
-        self.hash_mb.setValue(int(profile.get("hash_mb", self.hash_mb.value())))
-        self.multipv.setValue(int(profile.get("multipv", self.multipv.value())))
-        self.time_ms.setValue(int(profile.get("time_ms", self.time_ms.value())))

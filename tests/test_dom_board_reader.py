@@ -9,7 +9,7 @@ import chess
 
 from vision.dom_board_reader import DomBoardReader, DomUnavailableError
 from chess_tools.fen_builder import SquarePiece
-from engine.stockfish import EngineLine
+from engine.stockfish import AnalysisResult, EngineLine
 from ui.main_window import MainWindow, RealtimeWorker
 
 
@@ -138,6 +138,20 @@ class DomBoardReaderTurnTests(unittest.TestCase):
         self.assertIn("boardEl.querySelectorAll('.piece')", script)
         self.assertIn("side < 140", script)
 
+    def test_chessclub_reads_mui_clocks_and_table_move_history(self) -> None:
+        source = DomBoardReader.read.__code__.co_consts
+        script = next(
+            value
+            for value in source
+            if isinstance(value, str) and "const findBoard = () =>" in value
+        )
+
+        self.assertIn(
+            'table:has(.elapsed-time-bar) tr td[rowspan="2"] > div',
+            script,
+        )
+        self.assertIn("? 'p, [role=\"timer\"]'", script)
+
     def test_bottom_clock_respects_white_orientation(self) -> None:
         turn, reliable, _ = DomBoardReader._resolve_turn(
             {"activeClockPosition": "bottom", "blackAtBottom": False}, 0
@@ -250,13 +264,60 @@ class DomBoardReaderTurnTests(unittest.TestCase):
 
 
 class RealtimeWorkerSchedulingTests(unittest.TestCase):
-    def test_chesscom_and_lichess_request_four_candidate_moves(self) -> None:
-        self.assertEqual(RealtimeWorker._site_multipv("chess.com"), 4)
-        self.assertEqual(RealtimeWorker._site_multipv("chesscom"), 4)
-        self.assertEqual(RealtimeWorker._site_multipv("lichess"), 4)
-        self.assertEqual(RealtimeWorker._site_multipv("chessbase"), 1)
+    def test_all_supported_sites_use_configured_candidate_count(self) -> None:
+        self.assertEqual(RealtimeWorker._site_multipv("chess.com"), 3)
+        self.assertEqual(RealtimeWorker._site_multipv("chesscom"), 3)
+        self.assertEqual(RealtimeWorker._site_multipv("lichess"), 3)
+        self.assertEqual(RealtimeWorker._site_multipv("chessbase"), 3)
+        self.assertEqual(RealtimeWorker._site_multipv("chessclub"), 3)
         self.assertEqual(RealtimeWorker._site_multipv("lichess", 2), 2)
         self.assertEqual(RealtimeWorker._site_multipv("chess.com", 1), 1)
+
+    def test_ponder_is_available_on_every_supported_site(self) -> None:
+        config = Mock()
+        config.get.side_effect = lambda key, default=None: {
+            "analysis.active_time_control_preset": "RAPID",
+            "engine.ponder": True,
+        }.get(key, default)
+        worker = RealtimeWorker(
+            config=config,
+            engine_manager=Mock(),
+            tracker=Mock(),
+            template_recognizer=Mock(),
+            side_to_move=chess.WHITE,
+            last_fen="",
+        )
+
+        for site in ("chess.com", "lichess", "chessbase", "chessclub"):
+            self.assertTrue(worker._ponder_enabled(site), site)
+
+    def test_bullet_uses_fast_realtime_path(self) -> None:
+        config = Mock()
+        config.get.side_effect = lambda key, default=None: {
+            "analysis.active_time_control_preset": "BULLET",
+        }.get(key, default)
+        worker = RealtimeWorker(
+            config=config,
+            engine_manager=Mock(),
+            tracker=Mock(),
+            template_recognizer=Mock(),
+            side_to_move=chess.WHITE,
+            last_fen="",
+        )
+
+        self.assertTrue(worker._bullet_fast_path())
+
+    def test_chessclub_can_ponder_from_reconciled_tracked_fen(self) -> None:
+        self.assertTrue(
+            RealtimeWorker._can_use_ponder_fen(
+                "chessclub", exact_fen=False, has_history=True
+            )
+        )
+        self.assertFalse(
+            RealtimeWorker._can_use_ponder_fen(
+                "chessclub", exact_fen=False, has_history=False
+            )
+        )
 
     def test_dom_monitor_interrupts_analysis_when_board_changes(self) -> None:
         cancelled = threading.Event()
@@ -352,6 +413,102 @@ class RealtimeWorkerSchedulingTests(unittest.TestCase):
             multipv_override=1,
         )
 
+    def test_ponder_miss_refinement_uses_fixed_background_budget(self) -> None:
+        manager = Mock()
+        manager.analyze_fen.return_value = AnalysisResult(
+            fen=chess.STARTING_FEN,
+            best_move_uci="e2e4",
+            best_move_san="e4",
+            evaluation="+0.20",
+            depth=15,
+            seldepth=18,
+            nodes=1000,
+            tbhits=0,
+            hashfull=1,
+            thinking_time_ms=2000,
+            lines=[],
+            source="engine",
+        )
+        config = Mock()
+        config.get.side_effect = lambda key, default=None: {
+            "analysis.ponder_refinement_time_ms": 2000,
+        }.get(key, default)
+        worker = RealtimeWorker(
+            config=config,
+            engine_manager=manager,
+            tracker=Mock(),
+            template_recognizer=Mock(),
+            side_to_move=chess.WHITE,
+            last_fen="",
+            refinement_analysis=True,
+        )
+
+        result = worker._analyze(chess.STARTING_FEN, multipv=3)
+
+        self.assertEqual(result.source, "ponder_miss_refined")
+        manager.analyze_fen.assert_called_once_with(
+            chess.STARTING_FEN,
+            force=True,
+            realtime=True,
+            multipv_override=3,
+            time_ms_override=2000,
+            adaptive_override=False,
+        )
+
+    def test_ponder_miss_quick_search_uses_fixed_short_budget(self) -> None:
+        manager = Mock()
+        expected = object()
+        manager.analyze_fen.return_value = expected
+        config = Mock()
+        config.get.return_value = 650
+        worker = RealtimeWorker(
+            config=config,
+            engine_manager=manager,
+            tracker=Mock(),
+            template_recognizer=Mock(),
+            side_to_move=chess.WHITE,
+            last_fen="",
+        )
+
+        result = worker._analyze_quick(chess.STARTING_FEN, multipv=4)
+
+        self.assertIs(result, expected)
+        manager.analyze_fen.assert_called_once_with(
+            chess.STARTING_FEN,
+            force=True,
+            realtime=True,
+            multipv_override=4,
+            time_ms_override=650,
+            adaptive_override=False,
+        )
+
+    def test_ponder_completion_requests_all_missing_candidates(self) -> None:
+        manager = Mock()
+        expected = object()
+        manager.analyze_fen.return_value = expected
+        config = Mock()
+        config.get.return_value = 650
+        worker = RealtimeWorker(
+            config=config,
+            engine_manager=manager,
+            tracker=Mock(),
+            template_recognizer=Mock(),
+            side_to_move=chess.WHITE,
+            last_fen="",
+        )
+
+        result = worker._analyze_ponder_completion(chess.STARTING_FEN, multipv=4)
+
+        self.assertIs(result, expected)
+        manager.analyze_fen.assert_called_once_with(
+            chess.STARTING_FEN,
+            force=True,
+            realtime=True,
+            multipv_override=4,
+            time_ms_override=650,
+            adaptive_override=False,
+        )
+
     def test_ui_keeps_best_move_when_polling_the_same_position(self) -> None:
         self.assertEqual(
             MainWindow._retained_board_move("same-fen", "same-fen", "e2e4"),
@@ -403,6 +560,126 @@ class CandidateRoleTests(unittest.TestCase):
         self.assertEqual(selected, 0)
 
 
+class PonderTargetTests(unittest.TestCase):
+    def test_target_uses_reply_from_the_line_the_player_actually_chose(self) -> None:
+        board = chess.Board()
+        line = EngineLine(
+            move_uci="e2e4",
+            move_san="e4",
+            score="+0.25",
+            depth=18,
+            seldepth=22,
+            nodes=1000,
+            tbhits=0,
+            hashfull=1,
+            pv=["e2e4", "e7e5", "g1f3"],
+            score_cp=25,
+        )
+        result = AnalysisResult(
+            fen=board.fen(),
+            best_move_uci="e2e4",
+            best_move_san="e4",
+            evaluation="+0.25",
+            depth=18,
+            seldepth=22,
+            nodes=1000,
+            tbhits=0,
+            hashfull=1,
+            thinking_time_ms=500,
+            lines=[line],
+        )
+        board.push_uci("e2e4")
+
+        target = RealtimeWorker._ponder_target(result, board.fen())
+
+        self.assertIsNotNone(target)
+        assert target is not None
+        target_board = chess.Board(target[0])
+        expected = chess.Board()
+        expected.push_uci("e2e4")
+        expected.push_uci("e7e5")
+        self.assertEqual(target[1], "e5")
+        self.assertEqual(target_board.fen(), expected.fen())
+
+    def test_target_is_skipped_when_played_move_has_no_saved_pv(self) -> None:
+        board = chess.Board()
+        result = Mock(fen=board.fen(), lines=[])
+        board.push_uci("d2d4")
+
+        self.assertIsNone(RealtimeWorker._ponder_target(result, board.fen()))
+
+    def test_quick_prediction_builds_target_when_move_has_no_saved_pv(self) -> None:
+        board = chess.Board()
+        board.push_uci("e2e4")
+        prediction = Mock(best_move_uci="e7e5")
+        manager = Mock()
+        manager.analyze_fen.return_value = prediction
+        config = Mock()
+        config.get.return_value = 200
+        worker = RealtimeWorker(
+            config=config,
+            engine_manager=manager,
+            tracker=Mock(),
+            template_recognizer=Mock(),
+            side_to_move=chess.WHITE,
+            last_fen="",
+        )
+
+        target = worker._predict_ponder_target(board.fen())
+
+        self.assertIsNotNone(target)
+        assert target is not None
+        expected = board.copy(stack=False)
+        expected.push_uci("e7e5")
+        self.assertEqual(target, (expected.fen(), "e5"))
+        manager.analyze_fen.assert_called_once_with(
+            board.fen(),
+            force=True,
+            realtime=True,
+            multipv_override=1,
+            time_ms_override=200,
+            adaptive_override=False,
+        )
+
+    def test_bullet_speculation_starts_before_player_move_is_observed(self) -> None:
+        board = chess.Board()
+        line = EngineLine(
+            move_uci="e2e4",
+            move_san="e4",
+            score="+0.20",
+            depth=14,
+            seldepth=18,
+            nodes=1000,
+            tbhits=0,
+            hashfull=1,
+            pv=["e2e4", "e7e5", "g1f3"],
+            score_cp=20,
+        )
+        result = AnalysisResult(
+            fen=board.fen(),
+            best_move_uci="e2e4",
+            best_move_san="e4",
+            evaluation="+0.20",
+            depth=14,
+            seldepth=18,
+            nodes=1000,
+            tbhits=0,
+            hashfull=1,
+            thinking_time_ms=150,
+            lines=[line],
+        )
+
+        target = MainWindow._bullet_speculation_target(result)
+
+        self.assertIsNotNone(target)
+        assert target is not None
+        origin = chess.Board()
+        origin.push_uci("e2e4")
+        expected = origin.copy(stack=False)
+        expected.push_uci("e7e5")
+        self.assertEqual(target, (origin.fen(), expected.fen()))
+
+
 class ChessBaseOverlayTests(unittest.TestCase):
     def test_chessbase_overlay_uses_native_board_coordinates(self) -> None:
         script = DomBoardReader._chessbase_native_overlay_script("a1", "h8")
@@ -416,7 +693,7 @@ class ChessBaseOverlayTests(unittest.TestCase):
 
 
 class WebOverlayTests(unittest.TestCase):
-    def test_overlay_renders_four_ranked_colored_moves(self) -> None:
+    def test_overlay_limits_output_to_three_ranked_colored_moves(self) -> None:
         moves = [
             {"uci": "e2e4", "score": "+0.35", "rank": 1, "color": "#4ade80", "role": "E"},
             {"uci": "d2d4", "score": "+0.28", "rank": 2, "color": "#38bdf8", "role": "T"},
@@ -426,7 +703,7 @@ class WebOverlayTests(unittest.TestCase):
 
         script = DomBoardReader._moves_overlay_script(moves, "white")
 
-        self.assertIn('"uci": "c2c4"', script)
+        self.assertNotIn('"uci": "c2c4"', script)
         self.assertIn("badge.textContent", script)
         self.assertIn("arrowLine", script)
         self.assertIn("arrowHead", script)

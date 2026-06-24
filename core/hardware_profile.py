@@ -71,20 +71,6 @@ class HardwareProfile:
         time_ms = 2500 if logical >= 12 else 3000 if logical >= 8 else 4000
         return EngineRecommendation(threads=threads, hash_mb=hash_mb, time_ms=time_ms)
 
-    def recommend_weak(self) -> EngineRecommendation:
-        return EngineRecommendation(
-            threads=max(1, min(4, self.logical_processors // 2)),
-            hash_mb=min(512, self._safe_hash(512)),
-            time_ms=800,
-        )
-
-    def recommend_medium(self) -> EngineRecommendation:
-        return EngineRecommendation(
-            threads=max(2, min(8, self.logical_processors)),
-            hash_mb=min(2048, self._safe_hash(2048)),
-            time_ms=2500,
-        )
-
     def recommend_max_strength(self) -> EngineRecommendation:
         logical = max(1, self.logical_processors)
         threads = logical
@@ -144,36 +130,26 @@ def detect_hardware() -> HardwareProfile:
 def apply_recommendation(
     config: Any,
     profile: HardwareProfile,
-    mode: str = "STRONG",
 ) -> EngineRecommendation:
-    if mode == "WEAK":
-        recommendation = profile.recommend_weak()
-        preset = "WEAK"
-        prefer_book = True
-    elif mode in {"MEDIUM", "BALANCED"}:
-        recommendation = profile.recommend_medium()
-        preset = "MEDIUM"
-        prefer_book = True
-    else:
-        recommendation = profile.recommend_max_strength()
-        preset = "STRONG"
-        prefer_book = False
+    recommendation = profile.recommend_max_strength()
     config.set("hardware.signature", profile.signature)
     config.set("hardware.cpu_name", profile.cpu_name)
     config.set("hardware.physical_cores", profile.physical_cores)
     config.set("hardware.logical_processors", profile.logical_processors)
     config.set("hardware.ram_total_gb", profile.ram_total_gb)
     config.set("hardware.gpu_names", list(profile.gpu_names))
-    config.set("engine.auto_tune", True)
-    config.set("engine.threads", recommendation.threads)
-    config.set("engine.hash_mb", recommendation.hash_mb)
-    config.set("engine.ponder", recommendation.ponder)
-    config.set("engine.multipv", recommendation.multipv)
-    config.set("engine.skill_level", recommendation.skill_level)
-    config.set("analysis.preset", preset)
+    config.update_default_config({
+        "threads": recommendation.threads,
+        "hash_mb": recommendation.hash_mb,
+        "ponder": recommendation.ponder,
+        "multipv": recommendation.multipv,
+        "skill_level": recommendation.skill_level,
+        "time_ms": recommendation.time_ms,
+        "adaptive_time_enabled": True,
+    })
     config.set("analysis.game_minutes", 10)
-    config.set("analysis.time_ms", recommendation.time_ms)
-    config.set("book.prefer_book", prefer_book)
+    config.set("book.prefer_book", False)
+    config.apply_default_config()
     config.save()
     return recommendation
 

@@ -10,7 +10,6 @@ from typing import Any
 DEFAULT_SETTINGS: dict[str, Any] = {
     "engine": {
         "stockfish_path": "",
-        "auto_tune": True,
         "threads": 12,
         "hash_mb": 4096,
         "ponder": False,
@@ -26,8 +25,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "adaptive_max_time_ms": 6000,
         "adaptive_probe_time_ms": 300,
         "adaptive_realtime_max_time_ms": 4200,
+        "ponder_max_time_ms": 10000,
+        "ponder_hit_settle_ms": 25,
+        "ponder_miss_quick_time_ms": 650,
+        "ponder_prediction_time_ms": 200,
+        "ponder_completion_time_ms": 650,
+        "ponder_stop_timeout_ms": 200,
+        "ponder_refinement_time_ms": 2000,
+        "ponder_ready_depth": 8,
         "active_time_control_preset": "",
-        "preset": "STRONG",
         "game_minutes": 10,
         "cache_enabled": True,
     },
@@ -57,79 +63,80 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "hardware": {
         "signature": "",
     },
-    "profiles": {
-        "WEAK": {"threads": 4, "hash_mb": 512, "time_ms": 800, "multipv": 1, "ponder": False},
-        "MEDIUM": {"threads": 8, "hash_mb": 2048, "time_ms": 2500, "multipv": 1, "ponder": False},
-        "STRONG": {"threads": 16, "hash_mb": 8000, "time_ms": 4500, "multipv": 1, "ponder": False},
+    "default_config": {
+        "threads": 16,
+        "hash_mb": 8000,
+        "multipv": 1,
+        "ponder": False,
+        "skill_level": 20,
+        "contempt": 0,
+        "adaptive_time_enabled": True,
+        "time_ms": 4500,
+        "min_time_ms": 700,
+        "probe_time_ms": 300,
+        "realtime_max_time_ms": 4200,
+        "hard_max_time_ms": 6000,
     },
     "time_control_presets": {
-        "CHESSCOM_RAPID_10": {
-            "threads": 12,
-            "hash_mb": 4096,
-            "multipv": 4,
-            "ponder": False,
-            "skill_level": 20,
-            "contempt": 0,
-            "adaptive_time_enabled": True,
-            "time_ms": 3000,
-            "min_time_ms": 700,
-            "probe_time_ms": 300,
-            "realtime_max_time_ms": 3000,
-            "hard_max_time_ms": 6000,
-            "site": "chess.com",
-            "game_minutes": 10,
-        },
-        "LICHESS_RAPID_10": {
-            "threads": 12,
-            "hash_mb": 4096,
-            "multipv": 4,
-            "ponder": False,
-            "skill_level": 20,
-            "contempt": 0,
-            "adaptive_time_enabled": True,
-            "time_ms": 3000,
-            "min_time_ms": 700,
-            "probe_time_ms": 300,
-            "realtime_max_time_ms": 3000,
-            "hard_max_time_ms": 6000,
-            "site": "lichess",
-            "game_minutes": 10,
-        },
         "RAPID": {
-            "threads": 12,
-            "hash_mb": 4096,
-            "multipv": 4,
-            "ponder": False,
-            "adaptive_time_enabled": True,
-            "time_ms": 3000,
-            "min_time_ms": 700,
-            "probe_time_ms": 300,
-            "realtime_max_time_ms": 3000,
-            "hard_max_time_ms": 6000,
-        },
-        "BLITZ": {
             "threads": 8,
             "hash_mb": 2048,
+            "multipv": 3,
+            "ponder": True,
+            "adaptive_time_enabled": True,
+            "time_ms": 3000,
+            "min_time_ms": 700,
+            "probe_time_ms": 300,
+            "realtime_max_time_ms": 2000,
+            "hard_max_time_ms": 6000,
+            "ponder_max_time_ms": 10000,
+            "ponder_hit_settle_ms": 25,
+            "ponder_miss_quick_time_ms": 400,
+            "ponder_prediction_time_ms": 200,
+            "ponder_completion_time_ms": 650,
+            "ponder_stop_timeout_ms": 200,
+            "ponder_refinement_time_ms": 2000,
+            "ponder_ready_depth": 8,
+        },
+        "BLITZ": {
+            "threads": 6,
+            "hash_mb": 1024,
             "multipv": 2,
-            "ponder": False,
+            "ponder": True,
             "adaptive_time_enabled": False,
             "time_ms": 1000,
             "min_time_ms": 400,
             "probe_time_ms": 200,
             "realtime_max_time_ms": 1200,
             "hard_max_time_ms": 2000,
+            "ponder_max_time_ms": 5000,
+            "ponder_hit_settle_ms": 20,
+            "ponder_miss_quick_time_ms": 250,
+            "ponder_prediction_time_ms": 120,
+            "ponder_completion_time_ms": 350,
+            "ponder_stop_timeout_ms": 150,
+            "ponder_refinement_time_ms": 1000,
+            "ponder_ready_depth": 7,
         },
         "BULLET": {
-            "threads": 4,
+            "threads": 6,
             "hash_mb": 512,
             "multipv": 1,
-            "ponder": False,
+            "ponder": True,
             "adaptive_time_enabled": False,
-            "time_ms": 400,
+            "time_ms": 150,
             "min_time_ms": 200,
             "probe_time_ms": 150,
-            "realtime_max_time_ms": 450,
-            "hard_max_time_ms": 800,
+            "realtime_max_time_ms": 200,
+            "hard_max_time_ms": 400,
+            "ponder_max_time_ms": 2500,
+            "ponder_hit_settle_ms": 10,
+            "ponder_miss_quick_time_ms": 100,
+            "ponder_prediction_time_ms": 60,
+            "ponder_completion_time_ms": 150,
+            "ponder_stop_timeout_ms": 80,
+            "ponder_refinement_time_ms": 0,
+            "ponder_ready_depth": 5,
         },
     },
 }
@@ -152,7 +159,7 @@ class ConfigManager:
     def __post_init__(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._settings = self._load()
-        self._migrate_profiles()
+        self._migrate_legacy_profiles()
         self._restore_active_time_control_preset()
         self.save()
 
@@ -186,25 +193,24 @@ class ConfigManager:
             node = node.setdefault(part, {})
         node[parts[-1]] = value
 
-    def apply_profile(self, name: str) -> None:
-        profile = self.get(f"profiles.{name}")
-        if not isinstance(profile, dict):
-            raise ValueError(f"Unknown profile: {name}")
+    def update_default_config(self, values: dict[str, Any]) -> None:
+        current = self.get("default_config", {})
+        merged = dict(current) if isinstance(current, dict) else {}
+        merged.update(values)
+        self.set("default_config", merged)
+        self.save()
 
-        self.set("analysis.preset", name)
-        self.set("engine.auto_tune", False)
-        for key in ("threads", "hash_mb", "multipv", "ponder"):
-            if key in profile:
-                self.set(f"engine.{key}", profile[key])
-        if "time_ms" in profile:
-            self.set("analysis.time_ms", profile["time_ms"])
-        if "tablebase_enabled" in profile:
-            self.set("tablebase.enabled", profile["tablebase_enabled"])
+    def apply_default_config(self) -> None:
+        default = self.get("default_config", {})
+        if not isinstance(default, dict):
+            raise ValueError("Default engine configuration is invalid.")
+        self._apply_engine_values(default)
+        self.set("analysis.active_time_control_preset", "")
         self.save()
 
     def update_time_control_preset(self, name: str, values: dict[str, Any]) -> None:
         name = name.upper()
-        if name not in {"CHESSCOM_RAPID_10", "LICHESS_RAPID_10", "RAPID", "BLITZ", "BULLET"}:
+        if name not in {"RAPID", "BLITZ", "BULLET"}:
             raise ValueError(f"Unknown time-control preset: {name}")
         current = self.get(f"time_control_presets.{name}", {})
         merged = dict(current) if isinstance(current, dict) else {}
@@ -221,30 +227,40 @@ class ConfigManager:
         if not isinstance(preset, dict):
             raise ValueError(f"Unknown time-control preset: {name}")
 
-        if "adaptive_time_enabled" in preset:
-            self.set("analysis.adaptive_time_enabled", bool(preset["adaptive_time_enabled"]))
-        for key in ("threads", "hash_mb", "multipv", "skill_level", "contempt"):
-            if key in preset:
-                self.set(f"engine.{key}", int(preset[key]))
-        if "ponder" in preset:
-            self.set("engine.ponder", bool(preset["ponder"]))
-        self.set("engine.auto_tune", False)
-        analysis_keys = {
-            "time_ms": "analysis.time_ms",
-            "min_time_ms": "analysis.adaptive_min_time_ms",
-            "probe_time_ms": "analysis.adaptive_probe_time_ms",
-            "realtime_max_time_ms": "analysis.adaptive_realtime_max_time_ms",
-            "hard_max_time_ms": "analysis.adaptive_max_time_ms",
-        }
-        for source, target in analysis_keys.items():
-            if source in preset:
-                self.set(target, int(preset[source]))
+        self._apply_engine_values(preset)
         if "game_minutes" in preset:
             self.set("analysis.game_minutes", int(preset["game_minutes"]))
         if "site" in preset:
             self.set("browser.preferred_site", str(preset["site"]))
         self.set("analysis.active_time_control_preset", name)
         self.save()
+
+    def _apply_engine_values(self, values: dict[str, Any]) -> None:
+        if "adaptive_time_enabled" in values:
+            self.set("analysis.adaptive_time_enabled", bool(values["adaptive_time_enabled"]))
+        for key in ("threads", "hash_mb", "multipv", "skill_level", "contempt"):
+            if key in values:
+                self.set(f"engine.{key}", int(values[key]))
+        if "ponder" in values:
+            self.set("engine.ponder", bool(values["ponder"]))
+        analysis_keys = {
+            "time_ms": "analysis.time_ms",
+            "min_time_ms": "analysis.adaptive_min_time_ms",
+            "probe_time_ms": "analysis.adaptive_probe_time_ms",
+            "realtime_max_time_ms": "analysis.adaptive_realtime_max_time_ms",
+            "hard_max_time_ms": "analysis.adaptive_max_time_ms",
+            "ponder_max_time_ms": "analysis.ponder_max_time_ms",
+            "ponder_hit_settle_ms": "analysis.ponder_hit_settle_ms",
+            "ponder_miss_quick_time_ms": "analysis.ponder_miss_quick_time_ms",
+            "ponder_prediction_time_ms": "analysis.ponder_prediction_time_ms",
+            "ponder_completion_time_ms": "analysis.ponder_completion_time_ms",
+            "ponder_stop_timeout_ms": "analysis.ponder_stop_timeout_ms",
+            "ponder_refinement_time_ms": "analysis.ponder_refinement_time_ms",
+            "ponder_ready_depth": "analysis.ponder_ready_depth",
+        }
+        for source, target in analysis_keys.items():
+            if source in values:
+                self.set(target, int(values[source]))
 
     def toggle_time_control_preset(self, name: str) -> bool:
         """Apply a time preset, or restore max strength when clicked again."""
@@ -254,44 +270,31 @@ class ConfigManager:
             self.apply_time_control_preset(name)
             return True
 
-        self.apply_profile("STRONG")
-        self.set("analysis.adaptive_time_enabled", True)
-        self.set("analysis.active_time_control_preset", "")
-        self.save()
+        self.apply_default_config()
         return False
 
-    def _migrate_profiles(self) -> None:
-        preset = str(self.get("analysis.preset", "STRONG"))
-        if preset not in {"WEAK", "MEDIUM", "STRONG"}:
-            if preset in {"FAST", "BLITZ"}:
-                preset = "WEAK"
-            elif preset in {"BALANCED10", "RAPID"}:
-                preset = "MEDIUM"
-            else:
-                preset = "STRONG"
-            self.set("analysis.preset", preset)
-
+    def _migrate_legacy_profiles(self) -> None:
         profiles = self.get("profiles", {})
-        if not isinstance(profiles, dict):
-            return
-        for legacy in (
-            "MAX_STRENGTH",
-            "BALANCED10",
-            "FAST",
-            "BLITZ",
-            "RAPID10",
-            "RAPID",
-            "MAX",
-        ):
-            profiles.pop(legacy, None)
-
-        active = profiles.get(preset)
-        if isinstance(active, dict):
-            for key in ("threads", "hash_mb", "multipv", "ponder"):
-                if key in active:
-                    self.set(f"engine.{key}", active[key])
-            if "time_ms" in active:
-                self.set("analysis.time_ms", active["time_ms"])
+        default = self.get("default_config", {})
+        if isinstance(profiles, dict) and isinstance(profiles.get("STRONG"), dict):
+            # Existing users keep their customized Strong values as the sole
+            # default configuration during the one-time migration.
+            legacy_strong = profiles["STRONG"]
+            if isinstance(default, dict):
+                migrated = dict(default)
+                migrated.update(legacy_strong)
+                self.set("default_config", migrated)
+        self._settings.pop("profiles", None)
+        analysis = self._settings.get("analysis")
+        if isinstance(analysis, dict):
+            analysis.pop("preset", None)
+        engine = self._settings.get("engine")
+        if isinstance(engine, dict):
+            engine.pop("auto_tune", None)
+        presets = self._settings.get("time_control_presets")
+        if isinstance(presets, dict):
+            presets.pop("CHESSCOM_RAPID_10", None)
+            presets.pop("LICHESS_RAPID_10", None)
 
     def _restore_active_time_control_preset(self) -> None:
         active = str(self.get("analysis.active_time_control_preset", "")).upper()
@@ -303,3 +306,5 @@ class ConfigManager:
             self.set("analysis.active_time_control_preset", active)
         if active in {"RAPID", "BLITZ", "BULLET"}:
             self.apply_time_control_preset(active)
+        else:
+            self.apply_default_config()

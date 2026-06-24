@@ -8,7 +8,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import chess
 
@@ -65,7 +65,12 @@ class UciEngine:
             raise FileNotFoundError(f"Không tìm thấy Stockfish: {engine_path}")
         popen_args: dict[str, Any] = {}
         if sys.platform == "win32":
-            popen_args["creationflags"] = subprocess.CREATE_NO_WINDOW
+            # Keep all engine threads available for strength, but let the
+            # browser and Qt UI win scheduling contention during ponder.
+            popen_args["creationflags"] = (
+                subprocess.CREATE_NO_WINDOW
+                | subprocess.BELOW_NORMAL_PRIORITY_CLASS
+            )
         self._engine = subprocess.Popen(
             [str(engine_path)],
             stdin=subprocess.PIPE,
@@ -139,6 +144,62 @@ class UciEngine:
                 continue
             latest[int(parsed.get("multipv", 1))] = parsed
         return [latest[key] for key in sorted(latest)[: max(multipv, 1)]]
+
+    def ponder(
+        self,
+        board: chess.Board,
+        multipv: int,
+        max_time_ms: int,
+        started: threading.Event | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search a predicted position until hit/stop or the safety cap."""
+        self.start()
+        self._send(f"position fen {board.fen()}")
+        self._send("go ponder")
+        if started is not None:
+            started.set()
+
+        latest: dict[int, dict[str, Any]] = {}
+        reported_progress = (0, 0)
+        deadline = time.monotonic() + max(0.25, max_time_ms / 1000.0)
+        drain_deadline: float | None = None
+        while True:
+            now = time.monotonic()
+            if drain_deadline is None and now >= deadline:
+                self.stop()
+                drain_deadline = now + 2.0
+            if drain_deadline is not None and now >= drain_deadline:
+                self.abort()
+                raise TimeoutError("Stockfish không kết thúc ponder sau lệnh stop.")
+            try:
+                line = self._stdout_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if line is None:
+                raise RuntimeError("Stockfish đã dừng đột ngột khi ponder.")
+            if line.startswith("bestmove"):
+                break
+            if not line.startswith("info "):
+                continue
+            parsed = self._parse_info(line)
+            if parsed is not None:
+                latest[int(parsed.get("multipv", 1))] = parsed
+                depths = [int(item.get("depth", 0) or 0) for item in latest.values()]
+                progress = (
+                    min(len(latest), max(multipv, 1)),
+                    min(depths) if depths else 0,
+                )
+                if on_progress is not None and progress != reported_progress:
+                    reported_progress = progress
+                    on_progress(*progress)
+        return [latest[key] for key in sorted(latest)[: max(multipv, 1)]]
+
+    def ponder_hit(self) -> None:
+        if not self.is_running:
+            return
+        with suppress(Exception):
+            self._send("ponderhit")
 
     def quit(self) -> None:
         if self._engine is None:

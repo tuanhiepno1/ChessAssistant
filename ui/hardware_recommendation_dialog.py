@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
     QGroupBox,
-    QHBoxLayout,
     QLabel,
     QSpinBox,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -18,26 +15,15 @@ from core.config_manager import ConfigManager
 from core.hardware_profile import EngineRecommendation, HardwareProfile
 
 
-PROFILE_INFO = (
-    ("WEAK", "Yếu", "Nhẹ máy, phản hồi nhanh"),
-    ("MEDIUM", "Trung bình", "Cân bằng tốc độ và độ sâu"),
-    ("STRONG", "Mạnh nhất", "Dùng tối đa tài nguyên đã cấu hình"),
-)
-
-
 class HardwareRecommendationDialog(QDialog):
     def __init__(self, config: ConfigManager, profile: HardwareProfile, parent=None) -> None:
         super().__init__(parent)
         self.config = config
         self.profile = profile
-        self.editors: dict[str, dict[str, QSpinBox]] = {}
-        self.recommendations = {
-            "WEAK": profile.recommend_weak(),
-            "MEDIUM": profile.recommend_medium(),
-            "STRONG": profile.recommend_max_strength(),
-        }
+        self.editors: dict[str, QSpinBox] = {}
+        self.recommendation = profile.recommend_max_strength()
 
-        self.setWindowTitle("Cấu hình máy và chế độ Stockfish")
+        self.setWindowTitle("Cấu hình mặc định Stockfish")
         self.setMinimumWidth(520)
         self.resize(560, 690)
         layout = QVBoxLayout(self)
@@ -63,30 +49,10 @@ class HardwareRecommendationDialog(QDialog):
         hardware_form.addRow("Hệ điều hành", os_label)
         layout.addWidget(hardware)
 
-        self.selected_profile = QComboBox()
-        for key, label, _description in PROFILE_INFO:
-            self.selected_profile.addItem(label, key)
-        preset = self._normalized_preset(str(config.get("analysis.preset", "STRONG")))
-        self.selected_profile.setCurrentIndex(max(0, self.selected_profile.findData(preset)))
-        selection_row = QHBoxLayout()
-        selection_row.addWidget(QLabel("Chế độ dùng khi mở ứng dụng"))
-        selection_row.addWidget(self.selected_profile, 1)
-        layout.addLayout(selection_row)
-
-        profiles_tabs = QTabWidget()
-        for key, label, description in PROFILE_INFO:
-            profiles_tabs.addTab(
-                self._profile_group(key, label, description, self.recommendations[key]),
-                label,
-            )
-        profiles_tabs.setCurrentIndex(max(0, self.selected_profile.currentIndex()))
-        self.selected_profile.currentIndexChanged.connect(profiles_tabs.setCurrentIndex)
-        profiles_tabs.currentChanged.connect(self.selected_profile.setCurrentIndex)
-        layout.addWidget(profiles_tabs)
+        layout.addWidget(self._default_group(self.recommendation))
 
         note = QLabel(
-            "Các số khuyến nghị chỉ là điểm bắt đầu. Bạn có thể chỉnh và lưu riêng từng chế độ; "
-            "ứng dụng sẽ không tự ghi đè lại khi đổi chế độ."
+            "Đây là cấu hình mạnh duy nhất dùng khi không bật Rapid, Blitz hoặc Bullet."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #94a3b8;")
@@ -99,17 +65,11 @@ class HardwareRecommendationDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def _profile_group(
-        self,
-        key: str,
-        label: str,
-        description: str,
-        recommended: EngineRecommendation,
-    ) -> QWidget:
-        group = QGroupBox(label)
+    def _default_group(self, recommended: EngineRecommendation) -> QWidget:
+        group = QGroupBox("Mặc định mạnh")
         form = QFormLayout(group)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        saved = self.config.get(f"profiles.{key}", {})
+        saved = self.config.get("default_config", {})
         if not isinstance(saved, dict):
             saved = {}
 
@@ -139,7 +99,7 @@ class HardwareRecommendationDialog(QDialog):
             "padding: 7px; color: #bbf7d0; background: #052e16; "
             "border: 1px solid #166534; border-radius: 4px; font-weight: 600;"
         )
-        description_label = QLabel(description)
+        description_label = QLabel("Dùng khi không có preset nhịp độ nào được bật")
         description_label.setWordWrap(True)
 
         form.addRow(description_label)
@@ -148,7 +108,7 @@ class HardwareRecommendationDialog(QDialog):
         form.addRow("Thời gian", time_ms)
         form.addRow("Số nước", multipv)
         form.addRow(recommendation)
-        self.editors[key] = {
+        self.editors = {
             "threads": threads,
             "hash_mb": hash_mb,
             "time_ms": time_ms,
@@ -157,25 +117,22 @@ class HardwareRecommendationDialog(QDialog):
         return group
 
     def _save(self) -> None:
-        for key, editors in self.editors.items():
-            for setting, editor in editors.items():
-                self.config.set(f"profiles.{key}.{setting}", editor.value())
-            self.config.set(f"profiles.{key}.ponder", False)
-
-        selected = str(self.selected_profile.currentData())
+        active_preset = str(
+            self.config.get("analysis.active_time_control_preset", "")
+        ).upper()
+        self.config.update_default_config({
+            **{setting: editor.value() for setting, editor in self.editors.items()},
+            "ponder": False,
+            "adaptive_time_enabled": True,
+        })
         self.config.set("hardware.signature", self.profile.signature)
         self.config.set("hardware.cpu_name", self.profile.cpu_name)
         self.config.set("hardware.physical_cores", self.profile.physical_cores)
         self.config.set("hardware.logical_processors", self.profile.logical_processors)
         self.config.set("hardware.ram_total_gb", self.profile.ram_total_gb)
         self.config.set("hardware.gpu_names", list(self.profile.gpu_names))
-        self.config.apply_profile(selected)
+        if active_preset in {"RAPID", "BLITZ", "BULLET"}:
+            self.config.apply_time_control_preset(active_preset)
+        else:
+            self.config.apply_default_config()
         self.accept()
-
-    @staticmethod
-    def _normalized_preset(preset: str) -> str:
-        if preset in {"WEAK", "FAST", "BLITZ"}:
-            return "WEAK"
-        if preset in {"MEDIUM", "BALANCED10", "RAPID"}:
-            return "MEDIUM"
-        return "STRONG"

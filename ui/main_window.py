@@ -4,6 +4,7 @@ import html
 import math
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -267,6 +268,8 @@ class RealtimeWorker(QObject):
         generation: int = 0,
         has_current_analysis: bool = False,
         force_analysis: bool = False,
+        refinement_analysis: bool = False,
+        last_analysis_result: AnalysisResult | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -280,9 +283,12 @@ class RealtimeWorker(QObject):
         self.generation = generation
         self.has_current_analysis = has_current_analysis
         self.force_analysis = force_analysis
+        self.refinement_analysis = refinement_analysis
+        self.last_analysis_result = last_analysis_result
 
     @Slot()
     def run(self) -> None:
+        pipeline_started = time.perf_counter()
         try:
             dom_fallback_reason = ""
             try:
@@ -291,7 +297,11 @@ class RealtimeWorker(QObject):
                     target_id=self.browser_target_id,
                 )
                 state = reader.read()
-                stability_delay = 0.12 if "lichess.org" in state.url.lower() else 0.08
+                stability_delay = (
+                    0.010
+                    if self._bullet_fast_path()
+                    else (0.05 if "lichess.org" in state.url.lower() else 0.03)
+                )
                 time.sleep(stability_delay)
                 confirmed_state = reader.read()
                 if self._piece_signature(state.pieces) != self._piece_signature(confirmed_state.pieces):
@@ -375,12 +385,130 @@ class RealtimeWorker(QObject):
                             self.finished.emit(None, fen, len(state.pieces), None, None, status)
                             return
                     else:
+                        if self._can_use_ponder_fen(
+                            state.site,
+                            bool(state.exact_fen),
+                            bool(self.last_fen),
+                        ):
+                            ponder_note = self._start_ponder_for_opponent_turn(
+                                fen, state.site
+                            )
+                            if ponder_note:
+                                status += f" {ponder_note}"
+                        else:
+                            self.engine_manager.stop_ponder()
+                            status += " Ponder cần FEN chính xác từ website."
                         self.finished.emit(None, fen, len(state.pieces), None, None, status)
                         return
+                # A speculative Bullet search starts as soon as a suggestion is
+                # shown. Polling the unchanged player position must not resolve
+                # that search as a miss before the player has moved.
                 if not self._should_analyze(
-                    fen, self.last_fen, self.has_current_analysis, self.force_analysis
+                    fen,
+                    self.last_fen,
+                    self.has_current_analysis,
+                    self.force_analysis or self.refinement_analysis,
                 ):
                     self.finished.emit(None, fen, len(state.pieces), None, None, status)
+                    return
+                ponder_missed = False
+                if self._can_use_ponder_fen(
+                    state.site,
+                    bool(state.exact_fen),
+                    bool(self.last_fen),
+                ):
+                    ponder_result, ponder_outcome = self.engine_manager.resolve_ponder(
+                        fen,
+                        settle_ms=int(
+                            self.config.get("analysis.ponder_hit_settle_ms", 120)
+                        ),
+                    )
+                    if ponder_outcome == "miss":
+                        ponder_missed = True
+                        status += " Ponder miss; đã chuyển sang phân tích vị trí thực tế."
+                    elif ponder_outcome == "hit-empty":
+                        status += " Ponder hit nhưng chưa có đủ dữ liệu; đang tính tiếp."
+                    elif ponder_outcome == "hit-partial" and ponder_result is not None:
+                        expected = min(
+                            self._realtime_multipv(state.site),
+                            chess.Board(fen).legal_moves.count(),
+                        )
+                        status += (
+                            f" Ponder hit; hiện ngay {len(ponder_result.lines)}/{expected} "
+                            "phương án và đang bổ sung phần còn thiếu."
+                        )
+                        self.finished.emit(
+                            replace(ponder_result, source="ponder_partial"),
+                            fen,
+                            len(state.pieces),
+                            None,
+                            None,
+                            status,
+                        )
+                        completed = self._analyze_ponder_completion(fen, expected)
+                        completed_state = reader.read()
+                        if self._piece_signature(completed_state.pieces) != self._piece_signature(
+                            state.pieces
+                        ):
+                            self.finished.emit(
+                                None,
+                                completed_state.exact_fen or fen,
+                                len(completed_state.pieces),
+                                None,
+                                None,
+                                "Bàn cờ đổi khi đang bổ sung các phương án Ponder; đã bỏ kết quả cũ.",
+                            )
+                            return
+                        self.finished.emit(
+                            replace(completed, source="ponder_complete"),
+                            fen,
+                            len(state.pieces),
+                            None,
+                            None,
+                            f"{status} Đã bổ sung đủ {len(completed.lines)} phương án.",
+                        )
+                        return
+                    elif ponder_result is not None:
+                        status += " Ponder hit; dùng ngay kết quả đã tính trong lượt đối thủ."
+                        self.finished.emit(
+                            ponder_result, fen, len(state.pieces), None, None, status
+                        )
+                        return
+                else:
+                    self.engine_manager.stop_ponder()
+                if ponder_missed and not self.force_analysis and not self.refinement_analysis:
+                    quick_result = self._analyze_quick(
+                        fen,
+                        multipv=self._realtime_multipv(state.site),
+                    )
+                    quick_state = reader.read()
+                    if self._piece_signature(quick_state.pieces) != self._piece_signature(
+                        state.pieces
+                    ):
+                        self.finished.emit(
+                            None,
+                            quick_state.exact_fen or fen,
+                            len(quick_state.pieces),
+                            None,
+                            None,
+                            "Bàn cờ đổi trong lúc tính nhanh sau ponder miss; đã bỏ kết quả cũ.",
+                        )
+                        return
+                    self.finished.emit(
+                        replace(quick_result, source="ponder_miss_fast"),
+                        fen,
+                        len(state.pieces),
+                        None,
+                        None,
+                        status + " Đã hiện gợi ý nhanh; Stockfish đang tinh chỉnh nền.",
+                    )
+                    return
+                if self.refinement_analysis:
+                    result = self._analyze(fen, multipv=self._realtime_multipv(state.site))
+                    self.finished.emit(
+                        result, fen, len(state.pieces), None, None,
+                        status + " Đã tinh chỉnh kết quả nền.",
+                    )
                     return
                 result, changed_during_analysis = self._analyze_with_dom_monitor(
                     fen,
@@ -389,8 +517,14 @@ class RealtimeWorker(QObject):
                     multipv=self._realtime_multipv(state.site),
                 )
                 latest_state = reader.read()
-                time.sleep(stability_delay)
-                latest_confirmed = reader.read()
+                if self._bullet_fast_path():
+                    # The monitor already watched the position throughout the
+                    # search. One final snapshot is enough for Bullet and saves
+                    # one websocket round trip plus the settle delay.
+                    latest_confirmed = latest_state
+                else:
+                    time.sleep(stability_delay)
+                    latest_confirmed = reader.read()
                 if self._piece_signature(latest_state.pieces) != self._piece_signature(
                     latest_confirmed.pieces
                 ):
@@ -438,6 +572,14 @@ class RealtimeWorker(QObject):
                         "Bàn cờ đã đổi trong lúc Stockfish tính; đã bỏ kết quả cũ và chuyển sang thế mới.",
                     )
                     return
+                if ponder_missed:
+                    status += " Kết quả đầy đủ đã được tinh chỉnh sau gợi ý nhanh."
+                if self._bullet_fast_path() and result is not None:
+                    pipeline_ms = int((time.perf_counter() - pipeline_started) * 1000)
+                    status += (
+                        f" Bullet: tổng {pipeline_ms} ms, "
+                        f"Stockfish {result.thinking_time_ms} ms."
+                    )
                 self.finished.emit(result, fen, len(state.pieces), None, None, status)
                 return
             except DomUnavailableError as exc:
@@ -544,7 +686,8 @@ class RealtimeWorker(QObject):
                     self.finished.emit(None, fen, len(detections), board_image, box, image_status)
                     return
             if not self._should_analyze(
-                fen, self.last_fen, self.has_current_analysis, self.force_analysis
+                fen, self.last_fen, self.has_current_analysis,
+                self.force_analysis or self.refinement_analysis,
             ):
                 self.finished.emit(None, fen, len(detections), board_image, box, image_status)
                 return
@@ -555,6 +698,18 @@ class RealtimeWorker(QObject):
 
     def _analyze(self, fen: str, multipv: int = 1) -> AnalysisResult:
         try:
+            if self.refinement_analysis:
+                result = self.engine_manager.analyze_fen(
+                    fen,
+                    force=True,
+                    realtime=True,
+                    multipv_override=multipv,
+                    time_ms_override=int(
+                        self.config.get("analysis.ponder_refinement_time_ms", 2000)
+                    ),
+                    adaptive_override=False,
+                )
+                return replace(result, source="ponder_miss_refined")
             kwargs = {
                 "force": self.force_analysis,
                 "realtime": not self.force_analysis,
@@ -565,6 +720,39 @@ class RealtimeWorker(QObject):
         except Exception as exc:
             self.engine_manager.close_engine()
             raise RuntimeError(f"Stockfish gặp lỗi: {exc}") from exc
+
+    def _analyze_quick(self, fen: str, multipv: int) -> AnalysisResult:
+        try:
+            time_ms = int(
+                self.config.get("analysis.ponder_miss_quick_time_ms", 650)
+            )
+            return self.engine_manager.analyze_fen(
+                fen,
+                force=True,
+                realtime=True,
+                multipv_override=multipv,
+                time_ms_override=time_ms,
+                adaptive_override=False,
+            )
+        except Exception as exc:
+            self.engine_manager.close_engine()
+            raise RuntimeError(f"Stockfish tính nhanh sau ponder miss gặp lỗi: {exc}") from exc
+
+    def _analyze_ponder_completion(self, fen: str, multipv: int) -> AnalysisResult:
+        try:
+            return self.engine_manager.analyze_fen(
+                fen,
+                force=True,
+                realtime=True,
+                multipv_override=multipv,
+                time_ms_override=int(
+                    self.config.get("analysis.ponder_completion_time_ms", 650)
+                ),
+                adaptive_override=False,
+            )
+        except Exception as exc:
+            self.engine_manager.close_engine()
+            raise RuntimeError(f"Stockfish bổ sung phương án Ponder gặp lỗi: {exc}") from exc
 
     def _analyze_with_dom_monitor(
         self,
@@ -577,7 +765,8 @@ class RealtimeWorker(QObject):
         board_changed = threading.Event()
 
         def monitor() -> None:
-            while not stop_monitor.wait(0.10):
+            interval = 0.03 if self._bullet_fast_path() else 0.10
+            while not stop_monitor.wait(interval):
                 try:
                     current = reader.read()
                 except (DomUnavailableError, DomReadError):
@@ -626,23 +815,162 @@ class RealtimeWorker(QObject):
     def _preferred_site_multipv(self) -> int:
         return self._realtime_multipv(self.preferred_site)
 
+    def _bullet_fast_path(self) -> bool:
+        return str(
+            self.config.get("analysis.active_time_control_preset", "")
+        ).upper() == "BULLET"
+
     def _realtime_multipv(self, site: str) -> int:
         active = str(self.config.get("analysis.active_time_control_preset", "")).upper()
-        configured = 4
+        configured = int(self.config.get("engine.multipv", 1))
         if active:
             configured = int(
                 self.config.get(
                     f"time_control_presets.{active}.multipv",
-                    self.config.get("engine.multipv", 4),
+                    self.config.get("engine.multipv", 3),
                 )
             )
         return self._site_multipv(site, configured)
 
+    def _start_ponder_for_opponent_turn(self, current_fen: str, site: str) -> str:
+        if not self._ponder_enabled(site):
+            return ""
+
+        multipv = self._realtime_multipv(site)
+        phase, available, expected, depth = (
+            self.engine_manager.ponder_progress_for_origin(current_fen)
+        )
+        if phase == "running":
+            return (
+                f"Ponder đang tính {available}/{expected} PV ở độ sâu D{depth} "
+                "trong lượt đối thủ."
+            )
+        if phase == "ready":
+            return (
+                f"Ponder đã sẵn sàng {available}/{expected} PV ở độ sâu D{depth} "
+                "và tiếp tục đào sâu."
+            )
+
+        if self._bullet_fast_path():
+            # Bullet speculation must start while the player is still deciding.
+            # Starting a fresh prediction only after the move is visible is too
+            # late when the opponent replies immediately.
+            self.engine_manager.stop_ponder()
+            return ""
+
+        target = None
+        source = "PV trước"
+        if self.last_analysis_result is not None:
+            target = self._ponder_target(self.last_analysis_result, current_fen)
+        if target is None:
+            source = "dự đoán nhanh"
+            try:
+                target = self._predict_ponder_target(current_fen)
+            except Exception:
+                return "Ponder không thể tạo dự đoán nước đối thủ."
+        if target is None:
+            return "Ponder không tìm được nước đối thủ hợp lệ để dự đoán."
+        target_fen, predicted_reply = target
+        phase = self.engine_manager.start_ponder(
+            target_fen,
+            multipv=multipv,
+            max_time_ms=int(self.config.get("analysis.ponder_max_time_ms", 10000)),
+            origin_fen=current_fen,
+        )
+        if phase == "started":
+            return (
+                f"Ponder đang tính 0/{multipv} PV, dự đoán đối thủ đi "
+                f"{predicted_reply} từ {source}."
+            )
+        if phase == "ready":
+            return f"Ponder đã sẵn sàng {multipv}/{multipv} PV cho {predicted_reply}."
+        return f"Ponder tiếp tục tính 0/{multipv} PV cho {predicted_reply}."
+
+    def _predict_ponder_target(self, current_fen: str) -> tuple[str, str] | None:
+        board = chess.Board(current_fen)
+        prediction_time_ms = int(
+            self.config.get("analysis.ponder_prediction_time_ms", 200)
+        )
+        prediction = self.engine_manager.analyze_fen(
+            current_fen,
+            force=True,
+            realtime=True,
+            multipv_override=1,
+            time_ms_override=prediction_time_ms,
+            adaptive_override=False,
+        )
+        try:
+            reply = chess.Move.from_uci(prediction.best_move_uci)
+        except ValueError:
+            return None
+        if reply not in board.legal_moves:
+            return None
+        reply_san = board.san(reply)
+        board.push(reply)
+        return board.fen(), reply_san
+
+    def _ponder_enabled(self, site: str) -> bool:
+        active = str(self.config.get("analysis.active_time_control_preset", "")).upper()
+        return (
+            active in {"RAPID", "BLITZ", "BULLET"}
+            and bool(self.config.get("engine.ponder", False))
+            and self._normalized_site(site) in {
+                "chess.com", "lichess", "chessbase", "chessclub"
+            }
+        )
+
+    @staticmethod
+    def _can_use_ponder_fen(site: str, exact_fen: bool, has_history: bool) -> bool:
+        # ChessClub currently exposes neither move-list SAN nor a reliable
+        # active clock. Once legal history has been tracked, the reconciled FEN
+        # is safe enough to ponder without waiting for unavailable exact DOM data.
+        return exact_fen or (site == "chessclub" and has_history)
+
     @classmethod
-    def _site_multipv(cls, site: str, configured: int = 4) -> int:
-        if cls._normalized_site(site) not in {"chess.com", "lichess"}:
-            return 1
-        return max(1, min(int(configured), 4))
+    def _ponder_target(
+        cls,
+        previous_result: AnalysisResult,
+        current_fen: str,
+    ) -> tuple[str, str] | None:
+        try:
+            previous = chess.Board(previous_result.fen)
+            current = chess.Board(current_fen)
+        except ValueError:
+            return None
+        actual_move: chess.Move | None = None
+        current_key = cls._fen_position_key(current.fen())
+        for move in previous.legal_moves:
+            candidate = previous.copy(stack=False)
+            candidate.push(move)
+            if cls._fen_position_key(candidate.fen()) == current_key:
+                actual_move = move
+                break
+        if actual_move is None:
+            return None
+        line = next(
+            (item for item in previous_result.lines if item.move_uci == actual_move.uci()),
+            None,
+        )
+        if line is None or len(line.pv) < 2:
+            return None
+        try:
+            reply = chess.Move.from_uci(line.pv[1])
+        except ValueError:
+            return None
+        if reply not in current.legal_moves:
+            return None
+        reply_san = current.san(reply)
+        target = current.copy(stack=False)
+        target.push(reply)
+        return target.fen(), reply_san
+
+    @staticmethod
+    def _fen_position_key(fen: str) -> str:
+        return " ".join(fen.split()[:4])
+
+    @classmethod
+    def _site_multipv(cls, site: str, configured: int = 3) -> int:
+        return max(1, min(int(configured), 3))
 
     @staticmethod
     def _should_analyze(
@@ -698,20 +1026,23 @@ class MainWindow(QMainWindow):
         self._site_generation = 0
         self._browser_target_id = ""
         self._force_realtime_refresh = False
+        self._force_realtime_refinement = False
         self._refresh_in_progress = False
         self._realtime_busy_ticks = 0
+        self._realtime_started_at = 0.0
         self._realtime_hang_reported = False
         self._board_seen_logged = False
         self._visual_tracker = VisualBoardTracker()
         self._template_recognizer = TemplatePieceRecognizer()
         self._realtime_enabled = False
         self._realtime_timer = QTimer(self)
-        self._realtime_timer.setInterval(500)
+        self._realtime_timer.setInterval(150)
         self._realtime_timer.timeout.connect(self._realtime_tick)
 
         self.setWindowTitle("Trợ lý cờ vua")
         self._build_ui()
         self._load_settings_into_controls()
+        self._refresh_ponder_badge_idle()
         QTimer.singleShot(600, self._start_auto_realtime)
 
     def _build_ui(self) -> None:
@@ -725,10 +1056,8 @@ class MainWindow(QMainWindow):
         top_bar.setContentsMargins(8, 4, 8, 7)
         top_bar.setHorizontalSpacing(6)
         top_bar.setVerticalSpacing(5)
-        self.profile_combo = QComboBox()
-        self.profile_combo.addItem("Yếu", "WEAK")
-        self.profile_combo.addItem("Trung bình", "MEDIUM")
-        self.profile_combo.addItem("Mạnh nhất", "STRONG")
+        self.default_engine_label = QLabel("Mặc định mạnh")
+        self.default_engine_label.setStyleSheet("font-weight: 700; color: #dcfce7;")
         self.time_spin = QSpinBox()
         self.time_spin.setRange(100, 60000)
         self.time_spin.setSuffix(" ms")
@@ -774,7 +1103,7 @@ class MainWindow(QMainWindow):
         self.web_overlay_button = QPushButton()
         self.web_overlay_button.setCheckable(True)
         self.web_overlay_button.setToolTip(
-            "Bật: vẽ mũi tên màu, số thứ tự và điểm cho tối đa 4 nước trên website; "
+            "Bật: vẽ mũi tên màu, số thứ tự và điểm cho tối đa 3 nước trên website; "
             "ô nguồn có viền trắng nét đứt, ô đích mang màu của nước đi.\n"
             "Tắt: website không có dấu gợi ý; các nước chỉ hiện trong ứng dụng, phù hợp khi live stream."
         )
@@ -798,7 +1127,7 @@ class MainWindow(QMainWindow):
             "border: 1px solid #475569; border-radius: 6px;"
         )
         for control in (
-            self.profile_combo,
+            self.default_engine_label,
             self.time_spin,
             self.side_combo,
             self.rapid_time_button,
@@ -828,7 +1157,7 @@ class MainWindow(QMainWindow):
         )
 
         top_bar.addWidget(QLabel("Engine"), 0, 0)
-        top_bar.addWidget(self.profile_combo, 0, 1, 1, 2)
+        top_bar.addWidget(self.default_engine_label, 0, 1, 1, 2)
         self.time_label = QLabel("Mỗi nước")
         top_bar.addWidget(self.adaptive_time_checkbox, 0, 3, 1, 3)
         top_bar.addWidget(self.time_label, 0, 6)
@@ -925,7 +1254,19 @@ class MainWindow(QMainWindow):
         details_layout.setSpacing(6)
         difficulty_title = QLabel("ĐỘ KHÓ THẾ CỜ")
         difficulty_title.setStyleSheet("font-weight: 800; color: #cbd5e1;")
-        details_layout.addWidget(difficulty_title)
+        difficulty_header = QWidget()
+        difficulty_header_layout = QHBoxLayout(difficulty_header)
+        difficulty_header_layout.setContentsMargins(0, 0, 0, 0)
+        difficulty_header_layout.setSpacing(8)
+        difficulty_header_layout.addWidget(difficulty_title)
+        difficulty_header_layout.addStretch(1)
+        self.ponder_status_label = QLabel("PONDER: CHỜ")
+        self.ponder_status_label.setToolTip(
+            "Cho biết Stockfish đang ponder, đã hit, đang hiện gợi ý nhanh hay đã trả kết quả cuối."
+        )
+        self.ponder_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        difficulty_header_layout.addWidget(self.ponder_status_label)
+        details_layout.addWidget(difficulty_header)
         details_layout.addWidget(self.difficulty_label)
         primary_details = QWidget()
         form = QFormLayout(primary_details)
@@ -974,7 +1315,6 @@ class MainWindow(QMainWindow):
         log_layout.addWidget(self.status_output)
         layout.addWidget(self.log_group, 1)
 
-        self.profile_combo.currentIndexChanged.connect(self._apply_profile)
         self.time_spin.valueChanged.connect(self._set_time)
         self.adaptive_time_checkbox.toggled.connect(self._set_adaptive_time)
         self.rapid_time_button.clicked.connect(lambda: self._apply_time_control_preset("RAPID"))
@@ -994,14 +1334,9 @@ class MainWindow(QMainWindow):
         self.screen_fen_button.clicked.connect(self._build_fen_from_screen)
 
     def _load_settings_into_controls(self) -> None:
-        preset = str(self.config.get("analysis.preset", "STRONG"))
-        if preset not in {"WEAK", "MEDIUM", "STRONG"}:
-            preset = "STRONG"
-        profile_index = self.profile_combo.findData(preset)
-        self.profile_combo.blockSignals(True)
-        self.profile_combo.setCurrentIndex(max(profile_index, 0))
-        self.profile_combo.blockSignals(False)
+        self.time_spin.blockSignals(True)
         self.time_spin.setValue(int(self.config.get("analysis.time_ms", 1000)))
+        self.time_spin.blockSignals(False)
         self.adaptive_time_checkbox.blockSignals(True)
         self.adaptive_time_checkbox.setChecked(
             bool(self.config.get("analysis.adaptive_time_enabled", True))
@@ -1009,6 +1344,7 @@ class MainWindow(QMainWindow):
         self.adaptive_time_checkbox.blockSignals(False)
         self._sync_time_controls()
         self._sync_active_time_control_indicator()
+        self._sync_realtime_poll_interval()
         self._refresh_profile_summary()
         perspective = str(self.config.get("vision.perspective", "white"))
         index = self.side_combo.findData(perspective)
@@ -1079,41 +1415,25 @@ class MainWindow(QMainWindow):
         )
 
     @Slot(int)
-    def _apply_profile(self, _index: int) -> None:
-        profile = str(self.profile_combo.currentData())
-        self.config.apply_profile(profile)
-        self.config.set("analysis.active_time_control_preset", "")
-        self.config.save()
-        self.time_spin.blockSignals(True)
-        self.time_spin.setValue(int(self.config.get("analysis.time_ms", 1000)))
-        self.time_spin.blockSignals(False)
-        self._sync_time_controls()
-        self._refresh_profile_summary()
-        self._sync_active_time_control_indicator()
-        self.engine_manager.clear_cache()
-        self._log(f"Sức mạnh Stockfish: {self.profile_combo.currentText()}.")
-
-    @Slot(int)
     def _set_time(self, value: int) -> None:
-        self.config.set("analysis.time_ms", value)
-        self.config.set("analysis.active_time_control_preset", "")
-        profile = str(self.profile_combo.currentData())
-        if profile in {"WEAK", "MEDIUM", "STRONG"}:
-            self.config.set(f"profiles.{profile}.time_ms", value)
-        self.config.save()
+        self.config.update_default_config({"time_ms": value})
+        self.config.apply_default_config()
         self.engine_manager.clear_cache()
         self._refresh_profile_summary()
         self._sync_active_time_control_indicator()
+        self._sync_realtime_poll_interval()
+        self._refresh_ponder_badge_idle()
 
     @Slot(bool)
     def _set_adaptive_time(self, enabled: bool) -> None:
-        self.config.set("analysis.adaptive_time_enabled", enabled)
-        self.config.set("analysis.active_time_control_preset", "")
-        self.config.save()
+        self.config.update_default_config({"adaptive_time_enabled": enabled})
+        self.config.apply_default_config()
         self.engine_manager.clear_cache()
         self._sync_time_controls()
         self._refresh_profile_summary()
         self._sync_active_time_control_indicator()
+        self._sync_realtime_poll_interval()
+        self._refresh_ponder_badge_idle()
         if enabled:
             self._log("Phân tích thông minh: tự điều chỉnh thời gian theo độ khó của thế cờ.")
         else:
@@ -1122,12 +1442,8 @@ class MainWindow(QMainWindow):
             )
 
     def _apply_time_control_preset(self, name: str) -> None:
+        self.engine_manager.stop_ponder()
         enabled = self.config.toggle_time_control_preset(name)
-        profile = str(self.config.get("analysis.preset", "STRONG"))
-        profile_index = self.profile_combo.findData(profile)
-        self.profile_combo.blockSignals(True)
-        self.profile_combo.setCurrentIndex(max(profile_index, 0))
-        self.profile_combo.blockSignals(False)
         self.adaptive_time_checkbox.blockSignals(True)
         self.time_spin.blockSignals(True)
         self.adaptive_time_checkbox.setChecked(
@@ -1140,6 +1456,8 @@ class MainWindow(QMainWindow):
         self._sync_time_controls()
         self._refresh_profile_summary()
         self._sync_active_time_control_indicator()
+        self._sync_realtime_poll_interval()
+        self._refresh_ponder_badge_idle()
         if enabled:
             self._log(f"Đã áp dụng preset {name.title()}.")
         else:
@@ -1157,6 +1475,7 @@ class MainWindow(QMainWindow):
             "threads": "engine.threads",
             "hash_mb": "engine.hash_mb",
             "multipv": "engine.multipv",
+            "ponder": "engine.ponder",
             "skill_level": "engine.skill_level",
             "contempt": "engine.contempt",
             "time_ms": "analysis.time_ms",
@@ -1164,6 +1483,14 @@ class MainWindow(QMainWindow):
             "probe_time_ms": "analysis.adaptive_probe_time_ms",
             "realtime_max_time_ms": "analysis.adaptive_realtime_max_time_ms",
             "hard_max_time_ms": "analysis.adaptive_max_time_ms",
+            "ponder_max_time_ms": "analysis.ponder_max_time_ms",
+            "ponder_hit_settle_ms": "analysis.ponder_hit_settle_ms",
+            "ponder_miss_quick_time_ms": "analysis.ponder_miss_quick_time_ms",
+            "ponder_prediction_time_ms": "analysis.ponder_prediction_time_ms",
+            "ponder_completion_time_ms": "analysis.ponder_completion_time_ms",
+            "ponder_stop_timeout_ms": "analysis.ponder_stop_timeout_ms",
+            "ponder_refinement_time_ms": "analysis.ponder_refinement_time_ms",
+            "ponder_ready_depth": "analysis.ponder_ready_depth",
         }
         if matches:
             for source, target in timing_keys.items():
@@ -1195,6 +1522,12 @@ class MainWindow(QMainWindow):
         self.time_spin.setEnabled(not adaptive)
         self.time_label.setEnabled(not adaptive)
 
+    def _sync_realtime_poll_interval(self) -> None:
+        active = str(
+            self.config.get("analysis.active_time_control_preset", "")
+        ).upper()
+        self._realtime_timer.setInterval(50 if active == "BULLET" else 150)
+
     def _refresh_profile_summary(self) -> None:
         if self.adaptive_time_checkbox.isChecked():
             min_time = int(self.config.get("analysis.adaptive_min_time_ms", 700)) / 1000
@@ -1202,16 +1535,129 @@ class MainWindow(QMainWindow):
             time_text = f"thông minh {min_time:.1f}–{max_time:.1f} giây"
         else:
             time_text = f"cố định {self.time_spin.value() / 1000:.1f} giây"
-        active = str(self.config.get("analysis.active_time_control_preset", "")).upper()
         multipv_text = f"{int(self.config.get('engine.multipv', 1))} phương án"
+        ponder_text = "Ponder bật" if bool(self.config.get("engine.ponder", False)) else "Ponder tắt"
         self.profile_summary_label.setText(
             f"{int(self.config.get('engine.threads', 1))} luồng  ·  "
             f"{int(self.config.get('engine.hash_mb', 128))} MB  ·  {time_text}  ·  "
-            f"{multipv_text}"
+            f"{multipv_text}  ·  {ponder_text}"
+        )
+
+    def _refresh_ponder_badge_idle(self) -> None:
+        active = str(self.config.get("analysis.active_time_control_preset", "")).upper()
+        enabled = bool(active) and bool(self.config.get("engine.ponder", False))
+        if enabled:
+            self._set_ponder_badge("idle", "PONDER: CHỜ")
+        else:
+            self._set_ponder_badge("off", "PONDER: TẮT")
+
+    def _update_ponder_badge(
+        self,
+        result: AnalysisResult | None,
+        fen: str,
+        status: str,
+    ) -> None:
+        if result is not None:
+            elapsed = f"{result.thinking_time_ms / 1000:.1f}s"
+            if result.source == "ponder":
+                self._set_ponder_badge(
+                    "hit", f"PONDER HIT · {len(result.lines)} PV · {elapsed}"
+                )
+            elif result.source == "ponder_partial":
+                self._set_ponder_badge(
+                    "quick", f"PONDER HIT · {len(result.lines)} PV · ĐANG BỔ SUNG"
+                )
+            elif result.source == "ponder_complete":
+                self._set_ponder_badge(
+                    "hit", f"PONDER HIT · ĐỦ {len(result.lines)} PV · {elapsed}"
+                )
+            elif result.source == "ponder_miss_fast":
+                self._set_ponder_badge("quick", f"PONDER MISS · NHANH · {elapsed}")
+            else:
+                self._set_ponder_badge("final", f"KẾT QUẢ CUỐI · {elapsed}")
+            return
+
+        if "Ponder đang tính" in status or "Ponder tiếp tục tính" in status:
+            progress = next(
+                (
+                    token
+                    for token in status.split()
+                    if "/" in token
+                    and all(part.isdigit() for part in token.split("/", 1))
+                ),
+                "",
+            )
+            predicted = ""
+            marker = "đối thủ đi "
+            if marker in status:
+                predicted = status.split(marker, 1)[1].split(".", 1)[0].strip()
+            depth = next(
+                (token for token in status.split() if token.startswith("D") and token[1:].isdigit()),
+                "",
+            )
+            details = " · ".join(
+                item for item in (progress, depth, predicted) if item
+            )
+            suffix = f" · {details}" if details else ""
+            self._set_ponder_badge("thinking", f"PONDER: ĐANG TÍNH{suffix}")
+            return
+        if "Ponder đã sẵn sàng" in status or "Ponder đã chuẩn bị xong" in status:
+            progress = next(
+                (token for token in status.split() if "/" in token),
+                "",
+            )
+            depth = next(
+                (token for token in status.split() if token.startswith("D") and token[1:].isdigit()),
+                "",
+            )
+            details = " · ".join(item for item in (progress, depth) if item)
+            suffix = f" · {details}" if details else ""
+            self._set_ponder_badge("ready", f"PONDER: SẴN SÀNG{suffix}")
+            return
+        if "Ponder cần FEN chính xác" in status:
+            self._set_ponder_badge("unavailable", "PONDER: THIẾU FEN")
+            return
+        if "Ponder không thể" in status or "Ponder không tìm được" in status:
+            self._set_ponder_badge("unavailable", "PONDER: KHÔNG DỰ ĐOÁN ĐƯỢC")
+            return
+
+        active = str(self.config.get("analysis.active_time_control_preset", "")).upper()
+        enabled = bool(active) and bool(self.config.get("engine.ponder", False))
+        if not enabled:
+            self._set_ponder_badge("off", "PONDER: TẮT")
+            return
+        try:
+            board = chess.Board(fen)
+            player = chess.WHITE if self.side_combo.currentData() == "white" else chess.BLACK
+            if board.turn != player:
+                self._set_ponder_badge("unavailable", "PONDER: KHÔNG KHẢ DỤNG")
+                return
+        except ValueError:
+            pass
+        self._set_ponder_badge("idle", "PONDER: CHỜ")
+
+    def _set_ponder_badge(self, state: str, text: str) -> None:
+        palette = {
+            "off": ("#334155", "#cbd5e1", "#64748b"),
+            "idle": ("#1f2937", "#d1d5db", "#6b7280"),
+            "thinking": ("#581c87", "#f3e8ff", "#a855f7"),
+            "ready": ("#164e63", "#cffafe", "#06b6d4"),
+            "hit": ("#14532d", "#dcfce7", "#22c55e"),
+            "quick": ("#713f12", "#fef3c7", "#f59e0b"),
+            "final": ("#1e3a8a", "#dbeafe", "#3b82f6"),
+            "unavailable": ("#3f3f46", "#d4d4d8", "#71717a"),
+        }
+        background, foreground, border = palette.get(state, palette["idle"])
+        self.ponder_status_label.setText(text)
+        self.ponder_status_label.setStyleSheet(
+            f"font-size: 11px; font-weight: 900; padding: 3px 7px; "
+            f"color: {foreground}; background: {background}; "
+            f"border: 1px solid {border}; border-radius: 5px;"
         )
 
     @Slot()
     def _set_side(self, *_args) -> None:
+        self.engine_manager.stop_ponder()
         perspective = str(self.side_combo.currentData())
         self._site_generation += 1
         self.config.set("vision.perspective", perspective)
@@ -1226,9 +1672,11 @@ class MainWindow(QMainWindow):
         self._visual_tracker.reset()
         self._template_recognizer.reset()
         self._log(f"Bạn đang chơi bên {'Trắng' if perspective == 'white' else 'Đen'}.")
+        self._refresh_ponder_badge_idle()
 
     @Slot()
     def _new_game(self) -> None:
+        self.engine_manager.stop_ponder()
         self._site_generation += 1
         self._visual_tracker.reset()
         self._template_recognizer.reset()
@@ -1250,6 +1698,7 @@ class MainWindow(QMainWindow):
         self.depth_label.setText("-")
         self.details_label.setText("-")
         self.fen_status_label.setText("-")
+        self._refresh_ponder_badge_idle()
         self._log("Đã bắt đầu ván mới: lịch sử bàn cờ và gợi ý cũ đã được xóa.")
 
     @Slot()
@@ -1277,6 +1726,7 @@ class MainWindow(QMainWindow):
         self._open_site(CHESSCLUB_URL, "ChessClub")
 
     def _open_site(self, url: str, name: str) -> None:
+        self.engine_manager.stop_ponder()
         target_id = open_chess_url(url)
         if not target_id:
             self._log(f"Không mở được {name}: trình duyệt kết nối chưa sẵn sàng.")
@@ -1299,9 +1749,11 @@ class MainWindow(QMainWindow):
     def _open_settings(self) -> None:
         dialog = SettingsWindow(self.config, self)
         if dialog.exec():
+            self.engine_manager.stop_ponder()
             self.engine_manager.refresh_opening_book()
             self.engine_manager.clear_cache()
             self._load_settings_into_controls()
+            self._refresh_ponder_badge_idle()
             self._log("Đã lưu cài đặt và áp dụng cho lần phân tích tiếp theo.")
 
     @Slot()
@@ -1381,6 +1833,7 @@ class MainWindow(QMainWindow):
         self._log("Đã dừng tự động quét.")
 
     def shutdown_workers(self) -> None:
+        self.engine_manager.stop_ponder()
         self._realtime_enabled = False
         self._realtime_timer.stop()
         self._stop_thread(self._realtime_thread)
@@ -1407,7 +1860,8 @@ class MainWindow(QMainWindow):
             return
         if self._realtime_thread is not None:
             self._realtime_busy_ticks += 1
-            if self._realtime_busy_ticks >= 30 and not self._realtime_hang_reported:
+            elapsed = time.monotonic() - self._realtime_started_at
+            if elapsed >= 15.0 and not self._realtime_hang_reported:
                 self._realtime_hang_reported = True
                 self._log("Stockfish phản hồi chậm hơn 15 giây; yêu cầu tiếp theo đang được giữ lại.")
                 self.fen_status_label.setText("Stockfish đang phản hồi chậm; ứng dụng vẫn tiếp tục chờ.")
@@ -1415,9 +1869,12 @@ class MainWindow(QMainWindow):
 
         side_to_move = chess.WHITE if self.side_combo.currentData() == "white" else chess.BLACK
         force_analysis = self._force_realtime_refresh
+        refinement_analysis = self._force_realtime_refinement
         self._force_realtime_refresh = False
+        self._force_realtime_refinement = False
         self._refresh_in_progress = force_analysis
         self._realtime_busy_ticks = 0
+        self._realtime_started_at = time.monotonic()
         self._realtime_hang_reported = False
         if force_analysis:
             self.refresh_best_button.setEnabled(False)
@@ -1437,6 +1894,8 @@ class MainWindow(QMainWindow):
             generation=self._site_generation,
             has_current_analysis=bool(self._last_realtime_best_move),
             force_analysis=force_analysis,
+            refinement_analysis=refinement_analysis,
+            last_analysis_result=self._last_analysis_result,
         )
         self._realtime_worker.moveToThread(self._realtime_thread)
         self._realtime_thread.started.connect(self._realtime_worker.run)
@@ -1480,6 +1939,7 @@ class MainWindow(QMainWindow):
             self.board_position_label.setText("DOM")
         self._last_realtime_error = ""
         self._last_realtime_fen = fen
+        self._update_ponder_badge(result, fen, status)
         if result is None:
             position_changed = bool(previous_fen and fen != previous_fen)
             if position_changed:
@@ -1503,7 +1963,12 @@ class MainWindow(QMainWindow):
                 )
             return
 
+        self._start_bullet_speculation(result)
         self._render_analysis_result(result, board_image)
+        if result.source == "ponder_miss_fast" and int(
+            self.config.get("analysis.ponder_refinement_time_ms", 2000)
+        ) > 0:
+            self._force_realtime_refinement = True
         if self._refresh_in_progress:
             self._log(
                 f"Đã tính xong: {result.best_move_san}, đánh giá {result.evaluation} "
@@ -1511,6 +1976,44 @@ class MainWindow(QMainWindow):
             )
         if result.best_move_uci != self._last_realtime_best_move:
             self._last_realtime_best_move = result.best_move_uci
+
+    def _start_bullet_speculation(self, result: AnalysisResult) -> None:
+        active = str(
+            self.config.get("analysis.active_time_control_preset", "")
+        ).upper()
+        if active != "BULLET" or not bool(self.config.get("engine.ponder", False)):
+            return
+        target = self._bullet_speculation_target(result)
+        if target is None:
+            return
+        origin_fen, target_fen = target
+        self.engine_manager.start_ponder(
+            target_fen,
+            multipv=1,
+            max_time_ms=int(self.config.get("analysis.ponder_max_time_ms", 10000)),
+            origin_fen=origin_fen,
+        )
+
+    @staticmethod
+    def _bullet_speculation_target(
+        result: AnalysisResult,
+    ) -> tuple[str, str] | None:
+        if not result.lines or len(result.lines[0].pv) < 2:
+            return None
+        try:
+            board = chess.Board(result.fen)
+            suggested = chess.Move.from_uci(result.lines[0].pv[0])
+            if suggested not in board.legal_moves:
+                return None
+            board.push(suggested)
+            origin_fen = board.fen()
+            predicted_reply = chess.Move.from_uci(result.lines[0].pv[1])
+            if predicted_reply not in board.legal_moves:
+                return None
+            board.push(predicted_reply)
+        except ValueError:
+            return None
+        return origin_fen, board.fen()
 
     @Slot(str)
     def _realtime_failed(self, message: str) -> None:
@@ -1540,7 +2043,9 @@ class MainWindow(QMainWindow):
             self._refresh_in_progress = False
             self.refresh_best_button.setEnabled(True)
             self.refresh_best_button.setText("↻ Tính lại nước tốt nhất")
-        if self._force_realtime_refresh and self._realtime_enabled:
+        if (
+            self._force_realtime_refresh or self._force_realtime_refinement
+        ) and self._realtime_enabled:
             QTimer.singleShot(0, self._realtime_tick)
 
     @Slot()
@@ -1599,6 +2104,11 @@ class MainWindow(QMainWindow):
             "tablebase": "Cơ sở dữ liệu tàn cuộc Syzygy",
             "engine": "Stockfish",
             "engine_book_check": "Stockfish kiểm tra sách khai cuộc",
+            "ponder": "Ponder hit",
+            "ponder_partial": "Ponder hit chưa đủ phương án",
+            "ponder_complete": "Ponder hit đã bổ sung đủ phương án",
+            "ponder_miss_fast": "Gợi ý nhanh sau ponder miss",
+            "ponder_miss_refined": "Kết quả tinh chỉnh sau ponder miss",
         }.get(result.source, result.source)
         self.details_label.setText(f"{source_text} · {result.thinking_time_ms} ms")
         self._update_fen_status(result.fen, len(chess.Board(result.fen).piece_map()), result.source)
@@ -1642,6 +2152,11 @@ class MainWindow(QMainWindow):
             "tablebase": "cơ sở dữ liệu tàn cuộc",
             "engine": "Stockfish",
             "engine_book_check": "Stockfish kiểm tra sách khai cuộc",
+            "ponder": "Ponder hit",
+            "ponder_partial": "Ponder hit chưa đủ phương án",
+            "ponder_complete": "Ponder hit đã bổ sung đủ phương án",
+            "ponder_miss_fast": "gợi ý nhanh sau ponder miss",
+            "ponder_miss_refined": "kết quả tinh chỉnh sau ponder miss",
         }.get(source, source)
 
     def _show_move_on_web_board(self, result: AnalysisResult) -> None:
@@ -1650,7 +2165,7 @@ class MainWindow(QMainWindow):
         try:
             try:
                 human_index = self._human_candidate_index(
-                    chess.Board(result.fen), result.lines[:4]
+                    chess.Board(result.fen), result.lines[:3]
                 )
             except ValueError:
                 human_index = 1
@@ -1670,7 +2185,7 @@ class MainWindow(QMainWindow):
                         if applies
                     ),
                 }
-                for index, line in enumerate(result.lines[:4], start=1)
+                for index, line in enumerate(result.lines[:3], start=1)
             ]
             DomBoardReader(
                 preferred_site=str(self.config.get("browser.preferred_site", "auto")),
@@ -1697,10 +2212,10 @@ class MainWindow(QMainWindow):
         except ValueError:
             return "Không thể đọc các phương án vì FEN không hợp lệ."
 
-        human_index = self._human_candidate_index(board, result.lines[:4])
+        human_index = self._human_candidate_index(board, result.lines[:3])
         best_cp = result.lines[0].score_cp if result.lines else None
         descriptions = []
-        for index, line in enumerate(result.lines[:4], start=1):
+        for index, line in enumerate(result.lines[:3], start=1):
             move_text = self._describe_move(board, line.move_uci, line.move_san)
             color = self._candidate_color(index)
             ranking = "TỐT NHẤT" if index == 1 else f"LỰA CHỌN {index}"

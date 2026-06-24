@@ -28,7 +28,7 @@ Future vision flow:
 ## Package Boundaries
 
 - `app/`: process entry point.
-- `core/`: settings, profiles, config persistence.
+- `core/`: default engine settings, time-control presets, config persistence.
 - `engine/`: UCI engine process lifecycle and analysis result models.
 - `vision/`: screen capture, board detection, YOLO detection, square mapping.
 - `chess_tools/`: FEN construction and chess analysis orchestration.
@@ -52,4 +52,3 @@ The chess package is intentionally named `chess_tools`, not `chess`, because the
 - YOLO version upgrades are isolated in `vision.yolo_detector`; the app depends on the Ultralytics `YOLO` interface, not a hardcoded YOLOv8 class.
 - UCI options are filtered against engine-supported options before configuration.
 - Opening books and tablebases are separate managers so they can be enabled progressively in Phase 4.
-

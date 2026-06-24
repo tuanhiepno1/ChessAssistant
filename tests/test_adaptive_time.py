@@ -63,7 +63,7 @@ class AdaptiveTimeTests(unittest.TestCase):
 
             self.assertEqual(engine.analyze.call_args.kwargs["multipv"], 1)
 
-    def test_realtime_override_requests_four_pvs_for_chesscom(self) -> None:
+    def test_realtime_override_requests_three_pvs_for_chesscom(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = ConfigManager(Path(directory) / "settings.json")
             config.set("analysis.adaptive_time_enabled", False)
@@ -78,10 +78,10 @@ class AdaptiveTimeTests(unittest.TestCase):
                 manager.analyze_fen(
                     chess.STARTING_FEN,
                     realtime=True,
-                    multipv_override=4,
+                    multipv_override=3,
                 )
 
-            self.assertEqual(engine.analyze.call_args.kwargs["multipv"], 4)
+            self.assertEqual(engine.analyze.call_args.kwargs["multipv"], 3)
             opening_book.assert_not_called()
 
     def test_realtime_adaptive_probe_uses_single_pv(self) -> None:
@@ -113,6 +113,26 @@ class AdaptiveTimeTests(unittest.TestCase):
             with patch.object(manager, "_ensure_engine", return_value=engine):
                 manager.analyze_fen(chess.STARTING_FEN, realtime=False)
 
+            self.assertEqual(engine.analyze.call_args.kwargs["multipv"], 4)
+
+    def test_fast_ponder_miss_search_honors_time_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = ConfigManager(Path(directory) / "settings.json")
+            manager = EngineManager(config)
+            engine = Mock()
+            engine.analyze.return_value = [self._engine_line()]
+
+            with patch.object(manager, "_ensure_engine", return_value=engine):
+                manager.analyze_fen(
+                    chess.STARTING_FEN,
+                    force=True,
+                    realtime=True,
+                    multipv_override=4,
+                    time_ms_override=650,
+                    adaptive_override=False,
+                )
+
+            self.assertEqual(engine.analyze.call_args.kwargs["time_ms"], 650)
             self.assertEqual(engine.analyze.call_args.kwargs["multipv"], 4)
 
 

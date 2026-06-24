@@ -26,14 +26,34 @@ class EngineConfig:
     uci_options: dict[str, Any]
 
 
+@dataclass
+class PonderSession:
+    origin_fen: str
+    target_fen: str
+    multipv: int
+    started: threading.Event
+    done: threading.Event
+    cancelled: threading.Event
+    thread: threading.Thread | None = None
+    result: AnalysisResult | None = None
+    error: str = ""
+    available_pv: int = 0
+    expected_pv: int = 1
+    minimum_depth: int = 0
+    ready_depth: int = 8
+    ready: threading.Event | None = None
+
+
 class EngineManager:
     def __init__(self, config: ConfigManager) -> None:
         self.config = config
         self._engine: StockfishEngine | None = None
         self._opening_manager = OpeningManager()
-        self._configured_options: tuple[tuple[str, str], ...] | None = None
+        self._configured_options: dict[str, str] | None = None
         self._cache: dict[tuple[Any, ...], AnalysisResult] = {}
         self._lock = threading.Lock()
+        self._ponder_lock = threading.Lock()
+        self._ponder_session: PonderSession | None = None
 
     def load_config(self) -> EngineConfig:
         return EngineConfig(
@@ -65,10 +85,19 @@ class EngineManager:
             options["SyzygyPath"] = syzygy_path
             options["SyzygyProbeDepth"] = 1
         options.update(engine_config.uci_options)
-        option_signature = tuple(sorted((key, str(value)) for key, value in options.items()))
-        if option_signature != self._configured_options:
-            self._engine.configure(options)
-            self._configured_options = option_signature
+        option_signature = {key: str(value) for key, value in options.items()}
+        changed_options = (
+            options
+            if self._configured_options is None
+            else {
+                key: value
+                for key, value in options.items()
+                if self._configured_options.get(key) != str(value)
+            }
+        )
+        if changed_options:
+            self._engine.configure(changed_options)
+        self._configured_options = option_signature
         return self._engine
 
     def analyze_fen(
@@ -77,7 +106,10 @@ class EngineManager:
         force: bool = False,
         realtime: bool = False,
         multipv_override: int | None = None,
+        time_ms_override: int | None = None,
+        adaptive_override: bool | None = None,
     ) -> AnalysisResult:
+        self.stop_ponder()
         with self._lock:
             board = chess.Board(fen)
             engine_config = self.load_config()
@@ -85,7 +117,11 @@ class EngineManager:
                 engine_config = replace(engine_config, multipv=max(1, int(multipv_override)))
             elif realtime:
                 engine_config = replace(engine_config, multipv=1)
-            time_ms = int(self.config.get("analysis.time_ms", 1000))
+            time_ms = (
+                max(1, int(time_ms_override))
+                if time_ms_override is not None
+                else int(self.config.get("analysis.time_ms", 1000))
+            )
             cache_key = self._cache_key(board, time_ms, engine_config, realtime=realtime)
 
             if not force and bool(self.config.get("analysis.cache_enabled", True)) and cache_key in self._cache:
@@ -123,7 +159,12 @@ class EngineManager:
             for attempt in range(attempts):
                 started = time.perf_counter()
                 try:
-                    if bool(self.config.get("analysis.adaptive_time_enabled", False)):
+                    adaptive_enabled = (
+                        bool(adaptive_override)
+                        if adaptive_override is not None
+                        else bool(self.config.get("analysis.adaptive_time_enabled", False))
+                    )
+                    if adaptive_enabled:
                         info_lines, elapsed_ms = self._adaptive_analyze(board, engine_config, realtime=realtime)
                     else:
                         if realtime:
@@ -301,6 +342,11 @@ class EngineManager:
         )
 
     def _try_opening_book(self, board: chess.Board) -> AnalysisResult | None:
+        active_preset = str(
+            self.config.get("analysis.active_time_control_preset", "")
+        ).upper()
+        if active_preset == "BULLET":
+            return None
         self._opening_manager.configure(
             enabled=bool(self.config.get("book.enabled", False)),
             path=str(self.config.get("book.path", "")),
@@ -397,6 +443,7 @@ class EngineManager:
         self._cache.clear()
 
     def new_game(self) -> None:
+        self.stop_ponder()
         with self._lock:
             self.clear_cache()
             if self._engine is not None:
@@ -406,11 +453,185 @@ class EngineManager:
                     self._close_engine()
 
     def close(self) -> None:
+        self.stop_ponder()
         self._close_engine()
         self._opening_manager.close()
 
     def close_engine(self) -> None:
+        self.stop_ponder()
         self._close_engine()
+
+    def start_ponder(
+        self,
+        target_fen: str,
+        multipv: int,
+        max_time_ms: int,
+        origin_fen: str = "",
+    ) -> str:
+        target_key = self._position_key(target_fen)
+        with self._ponder_lock:
+            current = self._ponder_session
+            if current is not None and self._position_key(current.target_fen) == target_key:
+                ready = current.ready is not None and current.ready.is_set()
+                return "ready" if ready or current.done.is_set() else "running"
+        if current is not None:
+            self.stop_ponder()
+
+        session = PonderSession(
+            origin_fen=origin_fen,
+            target_fen=target_fen,
+            multipv=max(1, int(multipv)),
+            started=threading.Event(),
+            done=threading.Event(),
+            cancelled=threading.Event(),
+            expected_pv=min(
+                max(1, int(multipv)),
+                chess.Board(target_fen).legal_moves.count(),
+            ),
+            ready_depth=max(
+                1, int(self.config.get("analysis.ponder_ready_depth", 8))
+            ),
+            ready=threading.Event(),
+        )
+
+        def run() -> None:
+            started_at = time.perf_counter()
+            try:
+                with self._lock:
+                    if session.cancelled.is_set():
+                        return
+                    board = chess.Board(session.target_fen)
+                    config = replace(
+                        self.load_config(),
+                        ponder=True,
+                        multipv=session.multipv,
+                    )
+                    engine = self._ensure_engine(config)
+                    info_lines = engine.ponder(
+                        board,
+                        multipv=session.multipv,
+                        max_time_ms=max_time_ms,
+                        started=session.started,
+                        on_progress=lambda count, depth: self._update_ponder_progress(
+                            session, count, depth
+                        ),
+                    )
+                    if info_lines:
+                        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+                        session.result = replace(
+                            self._build_result(board, info_lines, elapsed_ms),
+                            source="ponder",
+                        )
+            except Exception as exc:
+                session.error = str(exc)
+            finally:
+                session.done.set()
+
+        session.thread = threading.Thread(
+            target=run,
+            daemon=True,
+            name="stockfish-ponder",
+        )
+        with self._ponder_lock:
+            self._ponder_session = session
+        session.thread.start()
+        return "started"
+
+    def resolve_ponder(self, actual_fen: str, settle_ms: int = 120) -> tuple[AnalysisResult | None, str]:
+        with self._ponder_lock:
+            session = self._ponder_session
+        if session is None:
+            return None, "none"
+
+        hit = self._position_key(session.target_fen) == self._position_key(actual_fen)
+        session.started.wait(timeout=1.0)
+        if not session.started.is_set() and not session.done.is_set():
+            session.cancelled.set()
+        engine = self._engine
+        if engine is not None and session.started.is_set() and not session.done.is_set():
+            if hit:
+                engine.ponder_hit()
+                time.sleep(max(0, settle_ms) / 1000.0)
+            engine.stop()
+        stop_timeout = max(
+            0.05,
+            int(self.config.get("analysis.ponder_stop_timeout_ms", 200)) / 1000.0,
+        )
+        session.done.wait(timeout=stop_timeout)
+        if not session.done.is_set():
+            # A stale ponder must never consume seconds on the critical miss
+            # path. Abort it and force all UCI options to be restored when the
+            # engine starts again.
+            if engine is not None:
+                engine.abort()
+                self._configured_options = None
+            session.done.wait(timeout=0.5)
+        result = session.result if hit and session.done.is_set() else None
+        if result is not None:
+            result = replace(result, fen=actual_fen, source="ponder")
+        with self._ponder_lock:
+            if self._ponder_session is session:
+                self._ponder_session = None
+        if hit and result is not None:
+            expected = min(session.multipv, chess.Board(actual_fen).legal_moves.count())
+            outcome = "hit" if len(result.lines) >= expected else "hit-partial"
+        else:
+            outcome = "hit-empty" if hit else "miss"
+        return result, outcome
+
+    def ponder_phase_for_origin(self, origin_fen: str) -> str:
+        """Return the active phase without restarting prediction on every poll."""
+        origin_key = self._position_key(origin_fen)
+        with self._ponder_lock:
+            session = self._ponder_session
+            if session is None or self._position_key(session.origin_fen) != origin_key:
+                return "none"
+            ready = session.ready is not None and session.ready.is_set()
+            return "ready" if ready or session.done.is_set() else "running"
+
+    def ponder_progress_for_origin(
+        self, origin_fen: str
+    ) -> tuple[str, int, int, int]:
+        """Return phase and live MultiPV availability for the active position."""
+        origin_key = self._position_key(origin_fen)
+        with self._ponder_lock:
+            session = self._ponder_session
+            if session is None or self._position_key(session.origin_fen) != origin_key:
+                return "none", 0, 0, 0
+            ready = session.ready is not None and session.ready.is_set()
+            phase = "ready" if ready or session.done.is_set() else "running"
+            return phase, session.available_pv, session.expected_pv, session.minimum_depth
+
+    @staticmethod
+    def _update_ponder_progress(
+        session: PonderSession, count: int, minimum_depth: int
+    ) -> None:
+        session.available_pv = max(session.available_pv, min(count, session.expected_pv))
+        session.minimum_depth = max(0, minimum_depth)
+        if (
+            session.available_pv >= session.expected_pv
+            and session.minimum_depth >= session.ready_depth
+            and session.ready is not None
+        ):
+            session.ready.set()
+
+    def stop_ponder(self) -> None:
+        with self._ponder_lock:
+            session = self._ponder_session
+        if session is None:
+            return
+        session.cancelled.set()
+        session.started.wait(timeout=0.5)
+        if session.started.is_set() and not session.done.is_set() and self._engine is not None:
+            self._engine.stop()
+        session.done.wait(timeout=3.0)
+        with self._ponder_lock:
+            if self._ponder_session is session:
+                self._ponder_session = None
+
+    @staticmethod
+    def _position_key(fen: str) -> str:
+        return " ".join(fen.split()[:4])
 
     def cancel_analysis(self) -> None:
         """Interrupt the current UCI search without waiting for the manager lock."""
