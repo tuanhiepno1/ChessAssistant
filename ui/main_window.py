@@ -851,13 +851,6 @@ class RealtimeWorker(QObject):
                 "và tiếp tục đào sâu."
             )
 
-        if self._bullet_fast_path():
-            # Bullet speculation must start while the player is still deciding.
-            # Starting a fresh prediction only after the move is visible is too
-            # late when the opponent replies immediately.
-            self.engine_manager.stop_ponder()
-            return ""
-
         target = None
         source = "PV trước"
         if self.last_analysis_result is not None:
@@ -912,7 +905,7 @@ class RealtimeWorker(QObject):
     def _ponder_enabled(self, site: str) -> bool:
         active = str(self.config.get("analysis.active_time_control_preset", "")).upper()
         return (
-            active in {"RAPID", "BLITZ", "BULLET"}
+            active in {"RAPID", "BLITZ"}
             and bool(self.config.get("engine.ponder", False))
             and self._normalized_site(site) in {
                 "chess.com", "lichess", "chessbase", "chessclub"

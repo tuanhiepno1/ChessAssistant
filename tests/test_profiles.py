@@ -29,7 +29,7 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(config.get("time_control_presets.BLITZ.multipv"), 2)
             self.assertTrue(config.get("time_control_presets.BLITZ.ponder"))
             self.assertEqual(config.get("time_control_presets.BULLET.multipv"), 1)
-            self.assertTrue(config.get("time_control_presets.BULLET.ponder"))
+            self.assertFalse(config.get("time_control_presets.BULLET.ponder"))
 
     def test_edited_time_control_preset_is_saved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -83,11 +83,9 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(config.get("engine.threads"), 6)
             self.assertEqual(config.get("engine.hash_mb"), 512)
             self.assertEqual(config.get("engine.multipv"), 1)
-            self.assertTrue(config.get("engine.ponder"))
+            self.assertFalse(config.get("engine.ponder"))
             self.assertFalse(config.get("analysis.adaptive_time_enabled"))
             self.assertEqual(config.get("analysis.time_ms"), 150)
-            self.assertEqual(config.get("analysis.ponder_miss_quick_time_ms"), 100)
-            self.assertEqual(config.get("analysis.ponder_prediction_time_ms"), 60)
 
     def test_bullet_skips_opening_book_entirely(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
