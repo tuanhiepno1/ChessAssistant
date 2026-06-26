@@ -13,7 +13,7 @@ from urllib.request import urlopen
 
 
 DEVTOOLS_ENDPOINT = "http://127.0.0.1:9222"
-DEFAULT_CHESS_URL = "https://www.chess.com/play/computer"
+DEFAULT_CHESS_URL = "https://play.chessclub.com/"
 CHESS_COM_URL = "https://www.chess.com/play/online"
 LICHESS_URL = "https://lichess.org/"
 CHESSBASE_URL = "https://play.chessbase.com/en/Play"

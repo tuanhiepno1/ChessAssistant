@@ -126,7 +126,7 @@ class UciEngine:
         # A realtime caller will poll again. A short grace period is enough to
         # receive bestmove and prevents one wedged engine from freezing updates
         # for 15+ seconds.
-        deadline = time.monotonic() + max(2.0, time_ms / 1000.0 + 3.0)
+        deadline = time.monotonic() + max(0.5, time_ms / 1000.0 + 0.3)
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:

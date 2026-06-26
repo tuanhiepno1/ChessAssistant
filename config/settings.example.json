@@ -1,7 +1,7 @@
 {
   "engine": {
     "stockfish_path": "C:/Tools/Stockfish/stockfish.exe",
-    "threads": 8,
+    "threads": 16,
     "hash_mb": 2048,
     "ponder": false,
     "multipv": 1,
@@ -67,8 +67,8 @@
   },
   "time_control_presets": {
     "RAPID": {
-      "threads": 8,
-      "hash_mb": 2048,
+      "threads": 16,
+      "hash_mb": 4096,
       "multipv": 3,
       "ponder": true,
       "adaptive_time_enabled": true,
@@ -87,8 +87,8 @@
       "ponder_ready_depth": 8
     },
     "BLITZ": {
-      "threads": 6,
-      "hash_mb": 1024,
+      "threads": 8,
+      "hash_mb": 512,
       "multipv": 2,
       "ponder": true,
       "adaptive_time_enabled": false,
@@ -107,24 +107,16 @@
       "ponder_ready_depth": 7
     },
     "BULLET": {
-      "threads": 6,
-      "hash_mb": 512,
+      "threads": 8,
+      "hash_mb": 256,
       "multipv": 1,
-      "ponder": true,
+      "ponder": false,
       "adaptive_time_enabled": false,
       "time_ms": 150,
       "min_time_ms": 200,
       "probe_time_ms": 150,
       "realtime_max_time_ms": 200,
-      "hard_max_time_ms": 400,
-      "ponder_max_time_ms": 2500,
-      "ponder_hit_settle_ms": 10,
-      "ponder_miss_quick_time_ms": 100,
-      "ponder_prediction_time_ms": 60,
-      "ponder_completion_time_ms": 150,
-      "ponder_stop_timeout_ms": 80,
-      "ponder_refinement_time_ms": 0,
-      "ponder_ready_depth": 5
+      "hard_max_time_ms": 400
     }
   }
 }

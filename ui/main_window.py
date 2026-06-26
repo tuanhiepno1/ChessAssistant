@@ -297,25 +297,24 @@ class RealtimeWorker(QObject):
                     target_id=self.browser_target_id,
                 )
                 state = reader.read()
-                stability_delay = (
-                    0.010
-                    if self._bullet_fast_path()
-                    else (0.05 if "lichess.org" in state.url.lower() else 0.03)
-                )
-                time.sleep(stability_delay)
-                confirmed_state = reader.read()
-                if self._piece_signature(state.pieces) != self._piece_signature(confirmed_state.pieces):
-                    fen = self.last_fen or START_FEN
-                    self.finished.emit(
-                        None,
-                        fen,
-                        len(confirmed_state.pieces),
-                        None,
-                        None,
-                        "DOM đang chuyển động; chờ hai lần đọc ổn định để tránh bắt nhầm thế cờ.",
+                if not self._bullet_fast_path():
+                    stability_delay = (
+                        0.05 if "lichess.org" in state.url.lower() else 0.03
                     )
-                    return
-                state = confirmed_state
+                    time.sleep(stability_delay)
+                    confirmed_state = reader.read()
+                    if self._piece_signature(state.pieces) != self._piece_signature(confirmed_state.pieces):
+                        fen = self.last_fen or START_FEN
+                        self.finished.emit(
+                            None,
+                            fen,
+                            len(confirmed_state.pieces),
+                            None,
+                            None,
+                            "DOM đang chuyển động; chờ hai lần đọc ổn định để tránh bắt nhầm thế cờ.",
+                        )
+                        return
+                    state = confirmed_state
                 # DomBoardReader has already combined clock position with the
                 # board's actual orientation. Do not reinterpret top/bottom as
                 # the user's selected colour here.
@@ -412,132 +411,136 @@ class RealtimeWorker(QObject):
                     self.finished.emit(None, fen, len(state.pieces), None, None, status)
                     return
                 ponder_missed = False
-                if self._can_use_ponder_fen(
-                    state.site,
-                    bool(state.exact_fen),
-                    bool(self.last_fen),
-                ):
-                    ponder_result, ponder_outcome = self.engine_manager.resolve_ponder(
-                        fen,
-                        settle_ms=int(
-                            self.config.get("analysis.ponder_hit_settle_ms", 120)
-                        ),
-                    )
-                    if ponder_outcome == "miss":
-                        ponder_missed = True
-                        status += " Ponder miss; đã chuyển sang phân tích vị trí thực tế."
-                    elif ponder_outcome == "hit-empty":
-                        status += " Ponder hit nhưng chưa có đủ dữ liệu; đang tính tiếp."
-                    elif ponder_outcome == "hit-partial" and ponder_result is not None:
-                        expected = min(
-                            self._realtime_multipv(state.site),
-                            chess.Board(fen).legal_moves.count(),
-                        )
-                        status += (
-                            f" Ponder hit; hiện ngay {len(ponder_result.lines)}/{expected} "
-                            "phương án và đang bổ sung phần còn thiếu."
-                        )
-                        self.finished.emit(
-                            replace(ponder_result, source="ponder_partial"),
+                if not self._bullet_fast_path():
+                    if self._can_use_ponder_fen(
+                        state.site,
+                        bool(state.exact_fen),
+                        bool(self.last_fen),
+                    ):
+                        ponder_result, ponder_outcome = self.engine_manager.resolve_ponder(
                             fen,
-                            len(state.pieces),
-                            None,
-                            None,
-                            status,
+                            settle_ms=int(
+                                self.config.get("analysis.ponder_hit_settle_ms", 120)
+                            ),
                         )
-                        completed = self._analyze_ponder_completion(fen, expected)
-                        completed_state = reader.read()
-                        if self._piece_signature(completed_state.pieces) != self._piece_signature(
+                        if ponder_outcome == "miss":
+                            ponder_missed = True
+                            status += " Ponder miss; đã chuyển sang phân tích vị trí thực tế."
+                        elif ponder_outcome == "hit-empty":
+                            status += " Ponder hit nhưng chưa có đủ dữ liệu; đang tính tiếp."
+                        elif ponder_outcome == "hit-partial" and ponder_result is not None:
+                            expected = min(
+                                self._realtime_multipv(state.site),
+                                chess.Board(fen).legal_moves.count(),
+                            )
+                            status += (
+                                f" Ponder hit; hiện ngay {len(ponder_result.lines)}/{expected} "
+                                "phương án và đang bổ sung phần còn thiếu."
+                            )
+                            self.finished.emit(
+                                replace(ponder_result, source="ponder_partial"),
+                                fen,
+                                len(state.pieces),
+                                None,
+                                None,
+                                status,
+                            )
+                            completed = self._analyze_ponder_completion(fen, expected)
+                            completed_state = reader.read()
+                            if self._piece_signature(completed_state.pieces) != self._piece_signature(
+                                state.pieces
+                            ):
+                                self.finished.emit(
+                                    None,
+                                    completed_state.exact_fen or fen,
+                                    len(completed_state.pieces),
+                                    None,
+                                    None,
+                                    "Bàn cờ đổi khi đang bổ sung các phương án Ponder; đã bỏ kết quả cũ.",
+                                )
+                                return
+                            self.finished.emit(
+                                replace(completed, source="ponder_complete"),
+                                fen,
+                                len(state.pieces),
+                                None,
+                                None,
+                                f"{status} Đã bổ sung đủ {len(completed.lines)} phương án.",
+                            )
+                            return
+                        elif ponder_result is not None:
+                            status += " Ponder hit; dùng ngay kết quả đã tính trong lượt đối thủ."
+                            self.finished.emit(
+                                ponder_result, fen, len(state.pieces), None, None, status
+                            )
+                            return
+                    else:
+                        self.engine_manager.stop_ponder()
+                    if ponder_missed and not self.force_analysis and not self.refinement_analysis:
+                        quick_result = self._analyze_quick(
+                            fen,
+                            multipv=self._realtime_multipv(state.site),
+                        )
+                        quick_state = reader.read()
+                        if self._piece_signature(quick_state.pieces) != self._piece_signature(
                             state.pieces
                         ):
                             self.finished.emit(
                                 None,
-                                completed_state.exact_fen or fen,
-                                len(completed_state.pieces),
+                                quick_state.exact_fen or fen,
+                                len(quick_state.pieces),
                                 None,
                                 None,
-                                "Bàn cờ đổi khi đang bổ sung các phương án Ponder; đã bỏ kết quả cũ.",
+                                "Bàn cờ đổi trong lúc tính nhanh sau ponder miss; đã bỏ kết quả cũ.",
                             )
                             return
                         self.finished.emit(
-                            replace(completed, source="ponder_complete"),
+                            replace(quick_result, source="ponder_miss_fast"),
                             fen,
                             len(state.pieces),
                             None,
                             None,
-                            f"{status} Đã bổ sung đủ {len(completed.lines)} phương án.",
+                            status + " Đã hiện gợi ý nhanh; Stockfish đang tinh chỉnh nền.",
                         )
                         return
-                    elif ponder_result is not None:
-                        status += " Ponder hit; dùng ngay kết quả đã tính trong lượt đối thủ."
+                    if self.refinement_analysis:
+                        result = self._analyze(fen, multipv=self._realtime_multipv(state.site))
                         self.finished.emit(
-                            ponder_result, fen, len(state.pieces), None, None, status
+                            result, fen, len(state.pieces), None, None,
+                            status + " Đã tinh chỉnh kết quả nền.",
                         )
                         return
-                else:
-                    self.engine_manager.stop_ponder()
-                if ponder_missed and not self.force_analysis and not self.refinement_analysis:
-                    quick_result = self._analyze_quick(
-                        fen,
-                        multipv=self._realtime_multipv(state.site),
-                    )
-                    quick_state = reader.read()
-                    if self._piece_signature(quick_state.pieces) != self._piece_signature(
-                        state.pieces
-                    ):
-                        self.finished.emit(
-                            None,
-                            quick_state.exact_fen or fen,
-                            len(quick_state.pieces),
-                            None,
-                            None,
-                            "Bàn cờ đổi trong lúc tính nhanh sau ponder miss; đã bỏ kết quả cũ.",
-                        )
-                        return
-                    self.finished.emit(
-                        replace(quick_result, source="ponder_miss_fast"),
-                        fen,
-                        len(state.pieces),
-                        None,
-                        None,
-                        status + " Đã hiện gợi ý nhanh; Stockfish đang tinh chỉnh nền.",
-                    )
-                    return
-                if self.refinement_analysis:
-                    result = self._analyze(fen, multipv=self._realtime_multipv(state.site))
-                    self.finished.emit(
-                        result, fen, len(state.pieces), None, None,
-                        status + " Đã tinh chỉnh kết quả nền.",
-                    )
-                    return
                 result, changed_during_analysis = self._analyze_with_dom_monitor(
                     fen,
                     reader,
                     self._piece_signature(state.pieces),
                     multipv=self._realtime_multipv(state.site),
                 )
-                latest_state = reader.read()
-                if self._bullet_fast_path():
-                    # The monitor already watched the position throughout the
-                    # search. One final snapshot is enough for Bullet and saves
-                    # one websocket round trip plus the settle delay.
-                    latest_confirmed = latest_state
+                if self._bullet_fast_path() and not changed_during_analysis:
+                    # The DOM monitor watched the position throughout the search
+                    # and saw no change.  The result is valid — skip the post-
+                    # analysis DOM read entirely for minimum latency.
+                    latest_state = state
                 else:
-                    time.sleep(stability_delay)
-                    latest_confirmed = reader.read()
-                if self._piece_signature(latest_state.pieces) != self._piece_signature(
-                    latest_confirmed.pieces
-                ):
-                    self.finished.emit(
-                        None,
-                        fen,
-                        len(latest_confirmed.pieces),
-                        None,
-                        None,
-                        "Bàn cờ đang chuyển động sau phân tích; đã bỏ kết quả cũ và chờ ảnh ổn định.",
-                    )
-                    return
-                latest_state = latest_confirmed
+                    latest_state = reader.read()
+                    if self._bullet_fast_path():
+                        latest_confirmed = latest_state
+                    else:
+                        time.sleep(stability_delay)
+                        latest_confirmed = reader.read()
+                    if self._piece_signature(latest_state.pieces) != self._piece_signature(
+                        latest_confirmed.pieces
+                    ):
+                        self.finished.emit(
+                            None,
+                            fen,
+                            len(latest_confirmed.pieces),
+                            None,
+                            None,
+                            "Bàn cờ đang chuyển động sau phân tích; đã bỏ kết quả cũ và chờ ảnh ổn định.",
+                        )
+                        return
+                    latest_state = latest_confirmed
                 if (
                     changed_during_analysis
                     or self._piece_signature(latest_state.pieces)
@@ -792,7 +795,13 @@ class RealtimeWorker(QObject):
                 result = None
         finally:
             stop_monitor.set()
-            monitor_thread.join(timeout=0.5)
+            # Bullet analyses only 150 ms — the monitor may still be mid-read
+            # inside a 100–400 ms WebSocket round-trip.  A 50 ms grace window
+            # lets an already-completing read finish; anything longer would
+            # cancel the latency gain we just achieved.  The daemon thread
+            # exits on its own shortly after.
+            join_timeout = 0.05 if self._bullet_fast_path() else 0.5
+            monitor_thread.join(timeout=join_timeout)
         return result, board_changed.is_set()
 
     @staticmethod
@@ -2109,7 +2118,10 @@ class MainWindow(QMainWindow):
             self.board_widget.set_position(result.fen, result.best_move_uci)
         else:
             self.board_widget.set_captured_position(result.fen, board_image, result.best_move_uci)
-        self._show_move_on_web_board(result)
+        # Defer the web overlay update so that the board and labels paint
+        # immediately.  The WebSocket round-trip (connect + 800-line JS script
+        # + browser execution) takes 100–300 ms and must not block the UI.
+        QTimer.singleShot(0, lambda: self._show_move_on_web_board(result))
 
     def _clear_best_move_display(self) -> None:
         self.best_move_label.setText("Đang chờ nước mới...")

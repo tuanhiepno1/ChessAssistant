@@ -170,7 +170,7 @@ class EngineManager:
                         if realtime:
                             time_ms = min(
                                 time_ms,
-                                self._clamp_int("analysis.adaptive_realtime_max_time_ms", 4200, 500, 60_000),
+                                self._clamp_int("analysis.adaptive_realtime_max_time_ms", 4200, 100, 60_000),
                             )
                         engine = self._ensure_engine(engine_config)
                         info_lines = engine.analyze(board, time_ms=time_ms, multipv=engine_config.multipv)

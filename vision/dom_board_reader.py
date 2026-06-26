@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import itertools
 import re
+import threading
 from dataclasses import dataclass
 from urllib.request import urlopen
 
@@ -53,6 +54,20 @@ class DomBoardState:
 
 
 class DomBoardReader:
+    # Class-level cache shared across all instances so that the overlay path
+    # (_show_move_on_web_board creating a fresh reader) reuses the page and
+    # WebSocket URL discovered by the realtime worker — saving one HTTP round-
+    # trip to /json and one WebSocket connect on every result render.
+    # The cache key includes endpoint + preferred_site + target_id so that
+    # switching sites or tabs automatically picks up the correct page.
+    _shared_page: dict | None = None
+    _shared_ws_url: str | None = None
+    _shared_cache_key: tuple[str, str, str] | None = None
+    # Thread-local persistent WebSocket.  Creating a new TCP connection per
+    # read costs 10–80 ms; reusing one connection per thread eliminates that
+    # overhead for every DOM read after the first in the same thread.
+    _ws_local = threading.local()
+
     def __init__(
         self,
         endpoint: str = "http://127.0.0.1:9222",
@@ -64,9 +79,13 @@ class DomBoardReader:
         self.target_id = target_id
         self._message_ids = itertools.count(1)
 
+    @property
+    def _cache_key(self) -> tuple[str, str, str]:
+        return (self.endpoint, self.preferred_site, self.target_id)
+
     def read(self) -> DomBoardState:
-        page = self._find_chess_page()
-        ws_url = page.get("webSocketDebuggerUrl")
+        page = self._get_page()
+        ws_url = self._get_ws_url(page)
         if not ws_url:
             raise DomReadError("Không tìm thấy WebSocket DevTools của thẻ cờ vua.")
 
@@ -528,8 +547,8 @@ class DomBoardReader:
         valid_moves = [move for move in moves[:3] if len(str(move.get("uci", ""))) >= 4]
         if not valid_moves:
             return
-        page = self._find_chess_page()
-        ws_url = page.get("webSocketDebuggerUrl")
+        page = self._get_page()
+        ws_url = self._get_ws_url(page)
         if not ws_url:
             raise DomReadError("Không tìm thấy WebSocket DevTools của thẻ cờ vua.")
 
@@ -543,8 +562,8 @@ class DomBoardReader:
         self._evaluate(ws_url, expression)
 
     def clear_best_move(self) -> None:
-        page = self._find_chess_page()
-        ws_url = page.get("webSocketDebuggerUrl")
+        page = self._get_page()
+        ws_url = self._get_ws_url(page)
         if not ws_url:
             raise DomReadError("Không tìm thấy WebSocket DevTools của thẻ cờ vua.")
         expression = r"""
@@ -634,13 +653,64 @@ class DomBoardReader:
             "Chưa tìm thấy trang cờ vua. Ứng dụng đang chờ trình duyệt tải xong."
         )
 
+    def _get_page(self) -> dict:
+        """Return the cached chess page, refreshing only when necessary.
+
+        The HTTP round-trip to ``/json`` is the single most expensive operation
+        in the realtime pipeline.  Reusing the page reference avoids a 50–600 ms
+        penalty on every ``read()`` while the tab remains open.
+
+        The cache is class-level, keyed by (endpoint, preferred_site, target_id),
+        so that overlay updates from the main thread reuse the page discovered by
+        the realtime worker thread, and switching sites automatically picks up
+        the correct page.
+        """
+        if (
+            DomBoardReader._shared_page is not None
+            and DomBoardReader._shared_cache_key == self._cache_key
+        ):
+            return DomBoardReader._shared_page
+        DomBoardReader._shared_page = self._find_chess_page()
+        DomBoardReader._shared_cache_key = self._cache_key
+        DomBoardReader._shared_ws_url = None  # re-resolve WS URL for new page
+        return DomBoardReader._shared_page
+
+    def _get_ws_url(self, page: dict) -> str | None:
+        if DomBoardReader._shared_ws_url is not None:
+            return DomBoardReader._shared_ws_url
+        ws_url = page.get("webSocketDebuggerUrl")
+        if ws_url:
+            DomBoardReader._shared_ws_url = str(ws_url)
+        return DomBoardReader._shared_ws_url
+
+    @classmethod
+    def _invalidate_page_cache(cls) -> None:
+        """Force the next read to re-discover the chess page.
+
+        Call after a WebSocket error that suggests the tab has been closed or
+        navigated away.
+        """
+        cls._shared_page = None
+        cls._shared_ws_url = None
+        cls._shared_cache_key = None
+
     def _evaluate(self, ws_url: str, expression: str) -> dict:
+        ws = getattr(DomBoardReader._ws_local, "conn", None)
+        if ws is None:
+            try:
+                ws = websocket.create_connection(
+                    ws_url, timeout=0.8, suppress_origin=True
+                )
+                ws.settimeout(2.0)
+                DomBoardReader._ws_local.conn = ws
+            except Exception as exc:
+                DomBoardReader._invalidate_page_cache()
+                raise DomReadError(
+                    f"Không kết nối được WebSocket DOM: {exc}"
+                ) from exc
+
+        message_id = next(self._message_ids)
         try:
-            ws = websocket.create_connection(ws_url, timeout=1.5, suppress_origin=True)
-        except Exception as exc:
-            raise DomReadError(f"Không kết nối được WebSocket DOM: {exc}") from exc
-        try:
-            message_id = next(self._message_ids)
             ws.send(
                 json.dumps(
                     {
@@ -662,8 +732,15 @@ class DomBoardReader:
                 if "value" in result:
                     return dict(result["value"])
                 raise DomReadError("DevTools không trả về dữ liệu bàn cờ.")
-        finally:
-            ws.close()
+        except Exception:
+            # Connection broken — discard and let the next call reconnect.
+            try:
+                ws.close()
+            except Exception:
+                pass
+            DomBoardReader._ws_local.conn = None
+            DomBoardReader._invalidate_page_cache()
+            raise
 
     @staticmethod
     def _move_count(moves: object) -> int:

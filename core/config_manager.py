@@ -79,8 +79,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "time_control_presets": {
         "RAPID": {
-            "threads": 8,
-            "hash_mb": 2048,
+            "threads": 16,
+            "hash_mb": 4096,
             "multipv": 3,
             "ponder": True,
             "adaptive_time_enabled": True,
@@ -99,8 +99,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "ponder_ready_depth": 8,
         },
         "BLITZ": {
-            "threads": 6,
-            "hash_mb": 1024,
+            "threads": 8,
+            "hash_mb": 512,
             "multipv": 2,
             "ponder": True,
             "adaptive_time_enabled": False,
@@ -119,8 +119,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "ponder_ready_depth": 7,
         },
         "BULLET": {
-            "threads": 6,
-            "hash_mb": 512,
+            "threads": 8,
+            "hash_mb": 256,
             "multipv": 1,
             "ponder": False,
             "adaptive_time_enabled": False,

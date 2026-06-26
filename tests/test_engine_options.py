@@ -22,8 +22,8 @@ class EngineOptionTests(unittest.TestCase):
             rapid = manager.load_config()
             manager._ensure_engine(rapid)
             first_options = engine.configure.call_args.args[0]
-            self.assertEqual(first_options["Threads"], 8)
-            self.assertEqual(first_options["Hash"], 2048)
+            self.assertEqual(first_options["Threads"], 16)
+            self.assertEqual(first_options["Hash"], 4096)
             self.assertEqual(first_options["MultiPV"], 3)
 
             engine.configure.reset_mock()

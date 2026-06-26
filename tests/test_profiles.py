@@ -51,8 +51,8 @@ class ProfileTests(unittest.TestCase):
 
             config.apply_time_control_preset("RAPID")
 
-            self.assertEqual(config.get("engine.threads"), 8)
-            self.assertEqual(config.get("engine.hash_mb"), 2048)
+            self.assertEqual(config.get("engine.threads"), 16)
+            self.assertEqual(config.get("engine.hash_mb"), 4096)
             self.assertEqual(config.get("engine.multipv"), 3)
             self.assertTrue(config.get("engine.ponder"))
             self.assertTrue(config.get("analysis.adaptive_time_enabled"))
@@ -67,8 +67,8 @@ class ProfileTests(unittest.TestCase):
 
             config.apply_time_control_preset("BLITZ")
 
-            self.assertEqual(config.get("engine.threads"), 6)
-            self.assertEqual(config.get("engine.hash_mb"), 1024)
+            self.assertEqual(config.get("engine.threads"), 8)
+            self.assertEqual(config.get("engine.hash_mb"), 512)
             self.assertEqual(config.get("engine.multipv"), 2)
             self.assertTrue(config.get("engine.ponder"))
             self.assertFalse(config.get("analysis.adaptive_time_enabled"))
@@ -80,8 +80,8 @@ class ProfileTests(unittest.TestCase):
 
             config.apply_time_control_preset("BULLET")
 
-            self.assertEqual(config.get("engine.threads"), 6)
-            self.assertEqual(config.get("engine.hash_mb"), 512)
+            self.assertEqual(config.get("engine.threads"), 8)
+            self.assertEqual(config.get("engine.hash_mb"), 256)
             self.assertEqual(config.get("engine.multipv"), 1)
             self.assertFalse(config.get("engine.ponder"))
             self.assertFalse(config.get("analysis.adaptive_time_enabled"))
