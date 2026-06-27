@@ -80,8 +80,15 @@ class EngineManager:
             "Skill Level": engine_config.skill_level,
             "Contempt": engine_config.contempt,
         }
+        active_preset = str(
+            self.config.get("analysis.active_time_control_preset", "")
+        ).upper()
         syzygy_path = str(self.config.get("tablebase.syzygy_path", ""))
-        if bool(self.config.get("tablebase.enabled", False)) and syzygy_path:
+        if (
+            active_preset != "BULLET"
+            and bool(self.config.get("tablebase.enabled", False))
+            and syzygy_path
+        ):
             options["SyzygyPath"] = syzygy_path
             options["SyzygyProbeDepth"] = 1
         options.update(engine_config.uci_options)
@@ -122,6 +129,9 @@ class EngineManager:
                 if time_ms_override is not None
                 else int(self.config.get("analysis.time_ms", 1000))
             )
+            bullet_active = str(
+                self.config.get("analysis.active_time_control_preset", "")
+            ).upper() == "BULLET"
             cache_key = self._cache_key(board, time_ms, engine_config, realtime=realtime)
 
             if not force and bool(self.config.get("analysis.cache_enabled", True)) and cache_key in self._cache:
@@ -141,9 +151,10 @@ class EngineManager:
                     source="cache",
                 )
 
-            tablebase_result = self._try_tablebase(board)
-            if tablebase_result is not None:
-                return tablebase_result
+            if not bullet_active:
+                tablebase_result = self._try_tablebase(board)
+                if tablebase_result is not None:
+                    return tablebase_result
 
             # A single book entry cannot satisfy a request for several choices.
             # In that mode, let the engine rank all candidates consistently.
@@ -155,7 +166,7 @@ class EngineManager:
 
             # The realtime tracker is itself the retry loop. Restarting a timed
             # out engine here delays observation of the opponent's next move.
-            attempts = 1 if realtime else 2
+            attempts = 1 if realtime or bullet_active else 2
             for attempt in range(attempts):
                 started = time.perf_counter()
                 try:
@@ -177,6 +188,9 @@ class EngineManager:
                         elapsed_ms = int((time.perf_counter() - started) * 1000)
                     result = self._build_result(board, info_lines, elapsed_ms)
                     self._cache[cache_key] = result
+                    if len(self._cache) > 256:
+                        for _ in range(64):
+                            self._cache.pop(next(iter(self._cache)))
                     return result
                 except Exception:
                     self._close_engine()
@@ -441,6 +455,19 @@ class EngineManager:
 
     def clear_cache(self) -> None:
         self._cache.clear()
+
+    def warm_up(self) -> bool:
+        """Start Stockfish and apply current options without running a search."""
+        with self._ponder_lock:
+            if self._ponder_session is not None:
+                return False
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            self._ensure_engine(self.load_config())
+            return True
+        finally:
+            self._lock.release()
 
     def new_game(self) -> None:
         self.stop_ponder()

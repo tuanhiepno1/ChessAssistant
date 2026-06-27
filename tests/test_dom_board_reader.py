@@ -353,6 +353,48 @@ class RealtimeWorkerSchedulingTests(unittest.TestCase):
         self.assertTrue(changed)
         manager.cancel_analysis.assert_called_once_with()
 
+    def test_bullet_skips_parallel_dom_monitor(self) -> None:
+        expected = AnalysisResult(
+            fen=chess.STARTING_FEN,
+            best_move_uci="e2e4",
+            best_move_san="e4",
+            evaluation="+0.20",
+            depth=10,
+            seldepth=12,
+            nodes=1000,
+            tbhits=0,
+            hashfull=1,
+            thinking_time_ms=150,
+            lines=[],
+        )
+        manager = Mock()
+        manager.analyze_fen.return_value = expected
+        config = Mock()
+        config.get.side_effect = lambda key, default=None: {
+            "analysis.active_time_control_preset": "BULLET",
+            "analysis.time_ms": 150,
+        }.get(key, default)
+        reader = Mock()
+        worker = RealtimeWorker(
+            config=config,
+            engine_manager=manager,
+            tracker=Mock(),
+            template_recognizer=Mock(),
+            side_to_move=chess.WHITE,
+            last_fen="",
+        )
+
+        result, changed = worker._analyze_with_dom_monitor(
+            chess.STARTING_FEN,
+            reader,
+            initial_signature=(),
+        )
+
+        self.assertEqual(result.best_move_uci, expected.best_move_uci)
+        self.assertEqual(result.source, "bullet")
+        self.assertFalse(changed)
+        reader.read.assert_not_called()
+
     def test_image_fallback_status_explains_dom_failure(self) -> None:
         status = RealtimeWorker._image_status(
             "YOLO đọc 30 quân.",

@@ -65,12 +65,7 @@ class UciEngine:
             raise FileNotFoundError(f"Không tìm thấy Stockfish: {engine_path}")
         popen_args: dict[str, Any] = {}
         if sys.platform == "win32":
-            # Keep all engine threads available for strength, but let the
-            # browser and Qt UI win scheduling contention during ponder.
-            popen_args["creationflags"] = (
-                subprocess.CREATE_NO_WINDOW
-                | subprocess.BELOW_NORMAL_PRIORITY_CLASS
-            )
+            popen_args["creationflags"] = subprocess.CREATE_NO_WINDOW
         self._engine = subprocess.Popen(
             [str(engine_path)],
             stdin=subprocess.PIPE,
@@ -123,10 +118,11 @@ class UciEngine:
         self._send(f"go movetime {max(time_ms, 1)}{search_moves}")
 
         latest: dict[int, dict[str, Any]] = {}
+        bestmove_uci = ""
         # A realtime caller will poll again. A short grace period is enough to
         # receive bestmove and prevents one wedged engine from freezing updates
         # for 15+ seconds.
-        deadline = time.monotonic() + max(0.5, time_ms / 1000.0 + 0.3)
+        deadline = time.monotonic() + max(0.25, time_ms / 1000.0 + 0.2)
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -136,6 +132,9 @@ class UciEngine:
                 )
             line = self._read_line(timeout_seconds=remaining)
             if line.startswith("bestmove"):
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] != "(none)":
+                    bestmove_uci = parts[1]
                 break
             if not line.startswith("info "):
                 continue
@@ -143,6 +142,8 @@ class UciEngine:
             if parsed is None:
                 continue
             latest[int(parsed.get("multipv", 1))] = parsed
+        if not latest and bestmove_uci:
+            return [{"pv_uci": [bestmove_uci], "score_text": "khÃ´ng cÃ³"}]
         return [latest[key] for key in sorted(latest)[: max(multipv, 1)]]
 
     def ponder(
@@ -232,7 +233,7 @@ class UciEngine:
         with suppress(Exception):
             process.kill()
         with suppress(Exception):
-            process.wait(timeout=1)
+            process.wait(timeout=0.1)
         with suppress(Exception):
             if process.stdin is not None:
                 process.stdin.close()

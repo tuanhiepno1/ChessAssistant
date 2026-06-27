@@ -25,7 +25,7 @@ class FakeProcess:
 
 
 class StockfishTimeoutTests(unittest.TestCase):
-    def test_windows_engine_process_runs_below_normal_priority(self) -> None:
+    def test_windows_engine_process_runs_hidden_without_lowering_priority(self) -> None:
         engine = UciEngine("stockfish.exe")
         process = Mock()
         process.poll.return_value = None
@@ -43,7 +43,7 @@ class StockfishTimeoutTests(unittest.TestCase):
 
         flags = popen.call_args.kwargs["creationflags"]
         self.assertTrue(flags & subprocess.CREATE_NO_WINDOW)
-        self.assertTrue(flags & subprocess.BELOW_NORMAL_PRIORITY_CLASS)
+        self.assertFalse(flags & subprocess.BELOW_NORMAL_PRIORITY_CLASS)
 
     def test_stop_interrupts_active_search(self) -> None:
         engine = UciEngine("unused")
@@ -68,6 +68,18 @@ class StockfishTimeoutTests(unittest.TestCase):
             engine.analyze(chess.Board(), time_ms=321, multipv=1)
 
         self.assertEqual(commands[-1], "go movetime 321")
+
+    def test_analysis_falls_back_to_bestmove_when_no_info_pv_arrives(self) -> None:
+        engine = UciEngine("unused")
+
+        with (
+            patch.object(engine, "start"),
+            patch.object(engine, "_send"),
+            patch.object(engine, "_read_line", return_value="bestmove e2e4"),
+        ):
+            lines = engine.analyze(chess.Board(), time_ms=150, multipv=1)
+
+        self.assertEqual(lines, [{"pv_uci": ["e2e4"], "score_text": "khÃ´ng cÃ³"}])
 
     def test_ponder_uses_go_ponder_and_collects_latest_lines(self) -> None:
         engine = UciEngine("unused")

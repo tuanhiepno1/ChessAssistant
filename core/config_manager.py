@@ -119,16 +119,24 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "ponder_ready_depth": 7,
         },
         "BULLET": {
-            "threads": 8,
+            "threads": 6,
             "hash_mb": 256,
             "multipv": 1,
             "ponder": False,
             "adaptive_time_enabled": False,
-            "time_ms": 150,
-            "min_time_ms": 200,
-            "probe_time_ms": 150,
-            "realtime_max_time_ms": 200,
-            "hard_max_time_ms": 400,
+            "time_ms": 120,
+            "min_time_ms": 80,
+            "probe_time_ms": 80,
+            "realtime_max_time_ms": 150,
+            "hard_max_time_ms": 300,
+            "ponder_max_time_ms": 0,
+            "ponder_hit_settle_ms": 0,
+            "ponder_miss_quick_time_ms": 80,
+            "ponder_prediction_time_ms": 0,
+            "ponder_completion_time_ms": 80,
+            "ponder_stop_timeout_ms": 100,
+            "ponder_refinement_time_ms": 0,
+            "ponder_ready_depth": 1,
         },
     },
 }
@@ -204,7 +212,7 @@ class ConfigManager:
         name = name.upper()
         if name not in {"RAPID", "BLITZ", "BULLET"}:
             raise ValueError(f"Unknown time-control preset: {name}")
-        current = self.get(f"time_control_presets.{name}", {})
+        current = self._time_control_preset_with_defaults(name)
         merged = dict(current) if isinstance(current, dict) else {}
         changed = any(merged.get(key) != value for key, value in values.items())
         merged.update(values)
@@ -215,9 +223,10 @@ class ConfigManager:
 
     def apply_time_control_preset(self, name: str) -> None:
         name = name.upper()
-        preset = self.get(f"time_control_presets.{name}")
+        preset = self._time_control_preset_with_defaults(name)
         if not isinstance(preset, dict):
             raise ValueError(f"Unknown time-control preset: {name}")
+        self.set(f"time_control_presets.{name}", preset)
 
         self._apply_engine_values(preset)
         if "game_minutes" in preset:
@@ -265,6 +274,16 @@ class ConfigManager:
         self.apply_default_config()
         return False
 
+    def _time_control_preset_with_defaults(self, name: str) -> dict[str, Any] | None:
+        default_presets = DEFAULT_SETTINGS.get("time_control_presets", {})
+        default = default_presets.get(name)
+        current = self.get(f"time_control_presets.{name}")
+        if not isinstance(default, dict):
+            return current if isinstance(current, dict) else None
+        if not isinstance(current, dict):
+            return copy.deepcopy(default)
+        return _deep_merge(default, current)
+
     def _migrate_legacy_profiles(self) -> None:
         profiles = self.get("profiles", {})
         default = self.get("default_config", {})
@@ -287,6 +306,45 @@ class ConfigManager:
         if isinstance(presets, dict):
             presets.pop("CHESSCOM_RAPID_10", None)
             presets.pop("LICHESS_RAPID_10", None)
+        self._migrate_bullet_preset()
+
+    def _migrate_bullet_preset(self) -> None:
+        """Ensure the BULLET preset always matches the latest code defaults.
+
+        The BULLET preset is performance-tuned in code; stale saved values
+        from a previous version must not prevent the new tuning from taking
+        effect.  Only engine-critical keys are migrated — site selection and
+        game_minutes are left untouched so the user's website preference
+        persists across updates.
+        """
+        default_bullet = DEFAULT_SETTINGS.get("time_control_presets", {}).get("BULLET")
+        if not isinstance(default_bullet, dict):
+            return
+        saved_bullet = self.get("time_control_presets.BULLET")
+        # Only migrate if the user has a saved BULLET preset whose engine
+        # values differ from the current code defaults.  A fresh install
+        # or first-time Bullet selection has no saved preset at all.
+        if not isinstance(saved_bullet, dict):
+            return
+        saved_threads = int(saved_bullet.get("threads", 0))
+        saved_time_ms = int(saved_bullet.get("time_ms", 0))
+        default_threads = int(default_bullet.get("threads", 0))
+        default_time_ms = int(default_bullet.get("time_ms", 0))
+        if saved_threads == default_threads and saved_time_ms == default_time_ms:
+            return  # Already up to date.
+
+        # Preserve site preference if the user explicitly chose one.
+        site = saved_bullet.get("site")
+        game_minutes = saved_bullet.get("game_minutes")
+
+        self.set(
+            "time_control_presets.BULLET",
+            copy.deepcopy(default_bullet),
+        )
+        if site is not None:
+            self.set("time_control_presets.BULLET.site", site)
+        if game_minutes is not None:
+            self.set("time_control_presets.BULLET.game_minutes", game_minutes)
 
     def _restore_active_time_control_preset(self) -> None:
         active = str(self.get("analysis.active_time_control_preset", "")).upper()

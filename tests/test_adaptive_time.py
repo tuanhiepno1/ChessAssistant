@@ -135,6 +135,27 @@ class AdaptiveTimeTests(unittest.TestCase):
             self.assertEqual(engine.analyze.call_args.kwargs["time_ms"], 650)
             self.assertEqual(engine.analyze.call_args.kwargs["multipv"], 4)
 
+    def test_bullet_skips_tablebase_and_does_not_retry_failed_realtime_search(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = ConfigManager(Path(directory) / "settings.json")
+            config.apply_time_control_preset("BULLET")
+            config.set("tablebase.enabled", True)
+            manager = EngineManager(config)
+            engine = Mock()
+            engine.analyze.side_effect = RuntimeError("engine stopped")
+
+            with (
+                patch.object(manager, "_ensure_engine", return_value=engine),
+                patch.object(manager, "_try_tablebase") as tablebase,
+                patch.object(manager, "_try_opening_book", return_value=None),
+                patch.object(manager, "_close_engine"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    manager.analyze_fen(chess.STARTING_FEN, force=True, realtime=False)
+
+            tablebase.assert_not_called()
+            self.assertEqual(engine.analyze.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -91,23 +91,23 @@ class SettingsWindow(QDialog):
         tab = QWidget()
         form = QFormLayout(tab)
         self.time_ms = QSpinBox()
-        self.time_ms.setRange(100, 60000)
+        self.time_ms.setRange(10, 60000)
         self.time_ms.setSuffix(" ms")
         self.time_ms.setToolTip(
             "Thời gian càng cao thì kết quả càng ổn định. Chế độ mạnh nhất tự đặt theo cấu hình máy."
         )
         self.adaptive_time_enabled = QCheckBox()
         self.adaptive_min_time_ms = QSpinBox()
-        self.adaptive_min_time_ms.setRange(100, 60000)
+        self.adaptive_min_time_ms.setRange(10, 60000)
         self.adaptive_min_time_ms.setSuffix(" ms")
         self.adaptive_max_time_ms = QSpinBox()
-        self.adaptive_max_time_ms.setRange(100, 120000)
+        self.adaptive_max_time_ms.setRange(10, 120000)
         self.adaptive_max_time_ms.setSuffix(" ms")
         self.adaptive_realtime_max_time_ms = QSpinBox()
-        self.adaptive_realtime_max_time_ms.setRange(100, 60000)
+        self.adaptive_realtime_max_time_ms.setRange(10, 60000)
         self.adaptive_realtime_max_time_ms.setSuffix(" ms")
         self.adaptive_probe_time_ms = QSpinBox()
-        self.adaptive_probe_time_ms.setRange(100, 10000)
+        self.adaptive_probe_time_ms.setRange(10, 10000)
         self.adaptive_probe_time_ms.setSuffix(" ms")
         self.cache_enabled = QCheckBox()
         mode_note = QLabel(
@@ -188,7 +188,7 @@ class SettingsWindow(QDialog):
             fields["adaptive_time_enabled"] = QCheckBox()
             for key in ("time_ms", "min_time_ms", "probe_time_ms", "realtime_max_time_ms", "hard_max_time_ms"):
                 spin = QSpinBox()
-                spin.setRange(100, 120000)
+                spin.setRange(10, 120000)
                 spin.setSuffix(" ms")
                 fields[key] = spin
             for key in (

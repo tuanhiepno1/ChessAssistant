@@ -107,16 +107,24 @@
       "ponder_ready_depth": 7
     },
     "BULLET": {
-      "threads": 8,
+      "threads": 6,
       "hash_mb": 256,
       "multipv": 1,
       "ponder": false,
       "adaptive_time_enabled": false,
-      "time_ms": 150,
-      "min_time_ms": 200,
-      "probe_time_ms": 150,
-      "realtime_max_time_ms": 200,
-      "hard_max_time_ms": 400
+      "time_ms": 120,
+      "min_time_ms": 80,
+      "probe_time_ms": 80,
+      "realtime_max_time_ms": 150,
+      "hard_max_time_ms": 300,
+      "ponder_max_time_ms": 0,
+      "ponder_hit_settle_ms": 0,
+      "ponder_miss_quick_time_ms": 80,
+      "ponder_prediction_time_ms": 0,
+      "ponder_completion_time_ms": 80,
+      "ponder_stop_timeout_ms": 100,
+      "ponder_refinement_time_ms": 0,
+      "ponder_ready_depth": 1
     }
   }
 }

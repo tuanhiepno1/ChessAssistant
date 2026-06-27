@@ -23,48 +23,69 @@
 
 Không sao chép thư mục `.venv` từ máy khác. Mỗi máy phải tạo lại môi trường Python để các thư viện native đúng với hệ điều hành và phiên bản Python.
 
-## Cài đặt nhanh trên máy Windows mới
+## Cài đặt trên máy Windows mới (từng bước chi tiết)
 
-### 1. Cài công cụ nền
+### Bước 1: Cài đặt công cụ nền
 
-Cài các phần mềm sau:
+Cài lần lượt **4 phần mềm** sau:
 
-1. Git for Windows.
-2. Python 3.11 hoặc mới hơn. Khi cài, chọn **Add Python to PATH**.
-3. Một trình duyệt được hỗ trợ. Có thể dùng Microsoft Edge có sẵn trên Windows; không bắt buộc cài Cốc Cốc hoặc Chrome.
-4. Stockfish cho Windows 64-bit từ trang chính thức của Stockfish và giải nén vào một thư mục cố định, ví dụ:
+**1.1 Git for Windows**
+- Tải từ: https://git-scm.com/download/win
+- Cài bản 64-bit, để mặc định tất cả tùy chọn, bấm Next đến hết.
 
-```text
-C:\Tools\Stockfish\stockfish.exe
-```
+**1.2 Python 3.11+ (64-bit)**
+- Tải từ: https://www.python.org/downloads/
+- **QUAN TRỌNG**: Tích chọn ☑ **Add Python to PATH** ở màn hình đầu tiên.
+- Chọn "Install Now" hoặc "Customize installation" (để mặc định).
 
-Nếu máy cũ hoặc không hỗ trợ AVX2, chọn đúng build Stockfish tương thích CPU.
+**1.3 Trình duyệt Chromium**
+- Windows 10/11 có sẵn **Microsoft Edge** — không cần cài thêm.
+- Nếu muốn dùng Chrome: tải từ https://www.google.com/chrome/
+- Nếu muốn dùng Cốc Cốc: tải từ https://coccoc.com/
+- Ứng dụng tự tìm theo thứ tự: Cốc Cốc → Chrome → Edge → Brave.
 
-### 2. Clone repository
+**1.4 Stockfish (Engine cờ vua)**
+- Tải từ: https://stockfishchess.org/download/windows/
+- Chọn bản **Windows 64-bit** (thường là bản AVX2 cho máy hiện đại, bản BMI2 cho Intel Haswell+, bản Modern cho AMD).
+- Giải nén file `.zip` vào thư mục cố định, ví dụ:
+  ```
+  C:\Tools\Stockfish\
+  ```
+- Kết quả sẽ có file `C:\Tools\Stockfish\stockfish-windows-x86-64-avx2.exe` (tên có thể khác tùy phiên bản).
+
+### Bước 2: Tải ChessAssistant
+
+Mở **PowerShell** (nhấn Win, gõ "PowerShell", chọn Windows PowerShell):
 
 ```powershell
+# Tạo thư mục chứa project (nếu chưa có)
+New-Item -ItemType Directory -Force -Path C:\Projects
+
+# Di chuyển vào thư mục
 cd C:\Projects
+
+# Clone repository
 git clone https://github.com/tuanhiepno1/ChessAssistant.git
+
+# Vào thư mục project
 cd ChessAssistant
 ```
 
-### 3. Cài thư viện tự động
+### Bước 3: Cài thư viện Python (tự động)
 
-Mở PowerShell trong thư mục project:
+Chạy script cài đặt:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
+Set-ExecutionPolicy -Scope Process -Force Bypass
 .\scripts\setup_windows.ps1
 ```
 
-Script sẽ:
+Script sẽ chạy khoảng **3-10 phút** (tùy tốc độ mạng) và tự động:
+- Tạo môi trường ảo `.venv`
+- Nâng cấp `pip`
+- Cài tất cả thư viện: PySide6, python-chess, opencv-python, websocket-client...
 
-- Tạo `.venv`.
-- Nâng cấp `pip`.
-- Cài toàn bộ dependency trong `requirements.txt`.
-- Kiểm tra model nhận diện.
-
-Hoặc cài thủ công:
+**Nếu script báo lỗi**, cài thủ công:
 
 ```powershell
 python -m venv .venv
@@ -73,32 +94,64 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-### 4. Khởi động lần đầu
+Sau khi cài xong, tắt cửa sổ PowerShell.
 
-Nhấp đúp:
+### Bước 4: Khởi động lần đầu
 
-```text
+**4.1 Mở ứng dụng**
+
+Nhấp đúp vào file:
+
+```
 MoTroLyCoVua.bat
 ```
 
-Ứng dụng sẽ tự tìm Cốc Cốc, Google Chrome, Microsoft Edge rồi Brave, và mở trình duyệt đầu tiên tìm thấy với cổng DevTools `9222`.
+Ứng dụng sẽ mở ra kèm một cửa sổ trình duyệt. Trình duyệt này dùng **profile riêng** (không ảnh hưởng Chrome/Edge cá nhân của bạn).
 
-Trình duyệt này dùng profile riêng trong thư mục tạm của Windows để không ảnh hưởng profile cá nhân và để DevTools hoạt động ổn định. Vì vậy, lần đầu chạy trên máy mới có thể cần đăng nhập lại tài khoản Chess.com, Lichess, ChessBase hoặc ChessClub trong cửa sổ trình duyệt do ứng dụng mở. Không tự mở website bằng một cửa sổ trình duyệt thông thường khác vì cửa sổ đó không có cổng DevTools `9222`.
+**4.2 Cấu hình Stockfish**
 
-Trong cửa sổ **Cài đặt → Stockfish**:
+Trong ứng dụng, bấm nút **⚙ Cài đặt**:
 
-1. Chọn đường dẫn tới `stockfish.exe` vừa giải nén.
-2. Chọn chế độ phù hợp cấu hình máy.
+1. Tab **Stockfish**: bấm **Duyệt...** và chọn file `stockfish.exe` đã giải nén ở Bước 1.4.
+2. Tab **Cấu hình**: chọn chế độ phù hợp:
+   - **Mặc định mạnh** — cho máy 16GB+ RAM
+   - **Rapid** — cho ván 10-30 phút
+   - **Blitz** — cho ván 3-5 phút
+   - **Bullet** — cho ván 1-2 phút (tối ưu tốc độ)
 3. Bấm **Lưu**.
 
-File `config/settings.json` sẽ tự được tạo trên máy mới. File này chứa đường dẫn và cấu hình riêng của máy nên không được commit lên Git.
+**4.3 Đăng nhập website cờ**
 
-### 5. Kiểm tra nhanh trước khi chơi
+Trong cửa sổ trình duyệt do ứng dụng mở:
+- Bấm nút **♟ Chess.com** hoặc **♟ Lichess** trong ứng dụng
+- Đăng nhập tài khoản của bạn trong trình duyệt
+- Vào một ván cờ bất kỳ
 
-1. Chọn **Tôi cầm Trắng** hoặc **Tôi cầm Đen** đúng với ván hiện tại.
-2. Bấm nút website cần chơi và đăng nhập trong trình duyệt do ứng dụng mở.
-3. Vào một ván, chờ dòng trạng thái báo đã đọc được bàn cờ và lượt đi.
-4. Nếu Stockfish chưa chạy, mở **Cài đặt → Stockfish**, chọn đúng file `.exe`, lưu rồi bấm **Tính lại nước tốt nhất**.
+**4.4 Kiểm tra hoạt động**
+
+1. Chọn **Tôi cầm Trắng** hoặc **Tôi cầm Đen** đúng với bên bạn đang chơi.
+2. Dòng trạng thái sẽ báo `DOM đọc X quân, lượt Trắng/Đen...`
+3. Ứng dụng sẽ hiển thị nước đi tốt nhất sau ~1-2 giây.
+4. Nếu chưa thấy phân tích, bấm **↻ Tính lại nước tốt nhất**.
+
+### Bước 5: Tùy chọn bổ sung
+
+**5.1 Sách khai cuộc (không bắt buộc)**
+- File nhỏ `books\lichess_2025_1000_1600.bin` đã có sẵn.
+- Bật/tắt trong **Cài đặt → Khai cuộc**.
+
+**5.2 Syzygy Tablebase (không bắt buộc)**
+- Tải bộ 3-4-5 quân (~1GB):
+  ```powershell
+  .\.venv\Scripts\python.exe scripts\download_syzygy_345.py
+  ```
+- Vào **Cài đặt → Tàn cuộc**, chọn thư mục `tablebase\syzygy\3-4-5` và bật.
+
+**5.3 Model YOLO (không bắt buộc)**
+- File `models\chess_piece_model.pt` dùng cho nhận diện bàn cờ từ ảnh chụp màn hình.
+- Nếu thiếu, chế độ DOM vẫn hoạt động bình thường.
+
+## Cài đặt nhanh (dành cho người đã quen)
 
 ## Chế độ hiển thị và live stream
 
@@ -126,7 +179,7 @@ Khung điều khiển dùng bố cục 8 cột, 5 hàng: các preset cùng hàng
 
 Số phương án tự đổi theo nhịp độ trên Chess.com/Lichess: Rapid dùng `3`, Blitz dùng `2`, Bullet dùng `1`. Bullet chỉ hiện lựa chọn `E`; Blitz vẫn có thể so sánh `E` và `T`. Các giá trị này có thể chỉnh trong **Cài đặt → Nhịp độ → Số phương án**.
 
-Nút **Bullet** dùng fast path riêng: không dùng sách khai cuộc, 6 luồng Stockfish ở `150 ms/nước`, quét DOM mỗi `50 ms`, và bắt đầu tính trước phản hồi ngay khi đưa nước gợi ý cho người chơi; bấm lại để trở về cấu hình mặc định mạnh.
+Nút **Bullet** dùng fast path riêng: không dùng sách khai cuộc, không tablebase, không Ponder, 6 luồng Stockfish ở `120 ms/nước`, đọc DOM 2 lần cách nhau `20 ms` để kiểm tra ổn định tránh bắt nhầm animation, và kiểm tra lại board sau phân tích để bảo đảm không hiển thị nước cũ. Overlay web hoạt động đầy đủ trong Bullet. Bấm lại để trở về cấu hình mặc định mạnh.
 
 ## Kiểm tra cài đặt
 

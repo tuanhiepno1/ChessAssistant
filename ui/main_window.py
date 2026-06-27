@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import math
+import queue
 import threading
 import time
 from dataclasses import replace
@@ -296,25 +297,28 @@ class RealtimeWorker(QObject):
                     preferred_site=self.preferred_site,
                     target_id=self.browser_target_id,
                 )
+                first_dom_started = time.perf_counter()
                 state = reader.read()
-                if not self._bullet_fast_path():
-                    stability_delay = (
-                        0.05 if "lichess.org" in state.url.lower() else 0.03
+                first_dom_ms = int((time.perf_counter() - first_dom_started) * 1000)
+                stability_delay = (
+                    0.02 if self._bullet_fast_path()
+                    else 0.05 if "lichess.org" in state.url.lower()
+                    else 0.03
+                )
+                time.sleep(stability_delay)
+                confirmed_state = reader.read()
+                if self._piece_signature(state.pieces) != self._piece_signature(confirmed_state.pieces):
+                    fen = self.last_fen or START_FEN
+                    self.finished.emit(
+                        None,
+                        fen,
+                        len(confirmed_state.pieces),
+                        None,
+                        None,
+                        "DOM đang chuyển động; chờ hai lần đọc ổn định để tránh bắt nhầm thế cờ.",
                     )
-                    time.sleep(stability_delay)
-                    confirmed_state = reader.read()
-                    if self._piece_signature(state.pieces) != self._piece_signature(confirmed_state.pieces):
-                        fen = self.last_fen or START_FEN
-                        self.finished.emit(
-                            None,
-                            fen,
-                            len(confirmed_state.pieces),
-                            None,
-                            None,
-                            "DOM đang chuyển động; chờ hai lần đọc ổn định để tránh bắt nhầm thế cờ.",
-                        )
-                        return
-                    state = confirmed_state
+                    return
+                state = confirmed_state
                 # DomBoardReader has already combined clock position with the
                 # board's actual orientation. Do not reinterpret top/bottom as
                 # the user's selected colour here.
@@ -516,11 +520,10 @@ class RealtimeWorker(QObject):
                     self._piece_signature(state.pieces),
                     multipv=self._realtime_multipv(state.site),
                 )
-                if self._bullet_fast_path() and not changed_during_analysis:
-                    # The DOM monitor watched the position throughout the search
-                    # and saw no change.  The result is valid — skip the post-
-                    # analysis DOM read entirely for minimum latency.
-                    latest_state = state
+                if self._bullet_fast_path():
+                    # Bullet has no DOM monitor — always re-read after
+                    # analysis to confirm the board is still the same.
+                    latest_state = reader.read()
                 else:
                     latest_state = reader.read()
                     if self._bullet_fast_path():
@@ -581,7 +584,7 @@ class RealtimeWorker(QObject):
                     pipeline_ms = int((time.perf_counter() - pipeline_started) * 1000)
                     status += (
                         f" Bullet: tổng {pipeline_ms} ms, "
-                        f"Stockfish {result.thinking_time_ms} ms."
+                        f"DOM {first_dom_ms} ms, Stockfish {result.thinking_time_ms} ms."
                     )
                 self.finished.emit(result, fen, len(state.pieces), None, None, status)
                 return
@@ -701,6 +704,16 @@ class RealtimeWorker(QObject):
 
     def _analyze(self, fen: str, multipv: int = 1) -> AnalysisResult:
         try:
+            if self._bullet_fast_path():
+                result = self.engine_manager.analyze_fen(
+                    fen,
+                    force=self.force_analysis,
+                    realtime=True,
+                    multipv_override=1,
+                    time_ms_override=int(self.config.get("analysis.time_ms", 150)),
+                    adaptive_override=False,
+                )
+                return replace(result, source="bullet")
             if self.refinement_analysis:
                 result = self.engine_manager.analyze_fen(
                     fen,
@@ -764,6 +777,9 @@ class RealtimeWorker(QObject):
         initial_signature: tuple[tuple[int, str], ...],
         multipv: int = 1,
     ) -> tuple[AnalysisResult | None, bool]:
+        if self._bullet_fast_path():
+            return self._analyze(fen, multipv=multipv), False
+
         stop_monitor = threading.Event()
         board_changed = threading.Event()
 
@@ -1013,6 +1029,103 @@ class RealtimeWorker(QObject):
         )
 
 
+class WebOverlayDispatcher:
+    def __init__(self) -> None:
+        self._commands: queue.Queue[dict[str, object]] = queue.Queue(maxsize=1)
+        self._stopped = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name="web-overlay-dispatcher",
+        )
+        self._thread.start()
+
+    def show(
+        self,
+        moves: list[dict[str, object]],
+        perspective: str,
+        preferred_site: str,
+        target_id: str,
+    ) -> None:
+        self._submit(
+            {
+                "kind": "show",
+                "moves": moves,
+                "perspective": perspective,
+                "preferred_site": preferred_site,
+                "target_id": target_id,
+            }
+        )
+
+    def clear(self, preferred_site: str, target_id: str) -> None:
+        self._submit(
+            {
+                "kind": "clear",
+                "preferred_site": preferred_site,
+                "target_id": target_id,
+            }
+        )
+
+    def stop(self) -> None:
+        self._stopped.set()
+        self._submit({"kind": "stop"})
+        self._thread.join(timeout=1.0)
+
+    def _submit(self, command: dict[str, object]) -> None:
+        while True:
+            try:
+                self._commands.get_nowait()
+            except queue.Empty:
+                break
+        try:
+            self._commands.put_nowait(command)
+        except queue.Full:
+            pass
+
+    def _run(self) -> None:
+        reader: DomBoardReader | None = None
+        reader_key: tuple[str, str] | None = None
+        while not self._stopped.is_set():
+            try:
+                command = self._commands.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            while True:
+                try:
+                    command = self._commands.get_nowait()
+                except queue.Empty:
+                    break
+            if command.get("kind") == "stop":
+                break
+
+            preferred_site = str(command.get("preferred_site", "auto"))
+            target_id = str(command.get("target_id", ""))
+            key = (preferred_site, target_id)
+            if reader is None or reader_key != key:
+                if reader is not None:
+                    reader.close_local_connection()
+                reader = DomBoardReader(
+                    preferred_site=preferred_site,
+                    target_id=target_id,
+                )
+                reader_key = key
+            try:
+                if command.get("kind") == "show":
+                    reader.show_moves(
+                        list(command.get("moves", [])),
+                        str(command.get("perspective", "white")),
+                        isolated_connection=True,
+                    )
+                elif command.get("kind") == "clear":
+                    reader.clear_best_move(isolated_connection=True)
+            except Exception:
+                if reader is not None:
+                    reader.close_local_connection()
+                continue
+        if reader is not None:
+            reader.close_local_connection()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config: ConfigManager, engine_manager: EngineManager) -> None:
         super().__init__()
@@ -1033,9 +1146,11 @@ class MainWindow(QMainWindow):
         self._realtime_busy_ticks = 0
         self._realtime_started_at = 0.0
         self._realtime_hang_reported = False
+        self._engine_warmup_thread: threading.Thread | None = None
         self._board_seen_logged = False
         self._visual_tracker = VisualBoardTracker()
         self._template_recognizer = TemplatePieceRecognizer()
+        self._web_overlay_dispatcher = WebOverlayDispatcher()
         self._realtime_enabled = False
         self._realtime_timer = QTimer(self)
         self._realtime_timer.setInterval(150)
@@ -1045,6 +1160,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._load_settings_into_controls()
         self._refresh_ponder_badge_idle()
+        QTimer.singleShot(300, self._warm_up_engine_async)
         QTimer.singleShot(600, self._start_auto_realtime)
 
     def _build_ui(self) -> None:
@@ -1061,9 +1177,9 @@ class MainWindow(QMainWindow):
         self.default_engine_label = QLabel("Mặc định mạnh")
         self.default_engine_label.setStyleSheet("font-weight: 700; color: #dcfce7;")
         self.time_spin = QSpinBox()
-        self.time_spin.setRange(100, 60000)
+        self.time_spin.setRange(10, 60000)
         self.time_spin.setSuffix(" ms")
-        self.time_spin.setSingleStep(100)
+        self.time_spin.setSingleStep(10)
         self.time_spin.setToolTip("Chỉ dùng khi tắt Thời gian thông minh.")
         self.adaptive_time_checkbox = QCheckBox("Thời gian thông minh")
         self.adaptive_time_checkbox.setToolTip(
@@ -1372,7 +1488,7 @@ class MainWindow(QMainWindow):
                 self._show_move_on_web_board(self._last_analysis_result)
             self._log("Overlay web đã bật: bàn cờ ứng dụng được ẩn và gợi ý sẽ hiện trên website.")
         else:
-            self._clear_move_from_web_board()
+            self._clear_move_from_web_board_async()
             self._log("Overlay web đã tắt: website không còn gợi ý; nước tốt nhất chỉ hiện trong ứng dụng.")
 
     def _apply_web_overlay_mode(self) -> None:
@@ -1460,10 +1576,31 @@ class MainWindow(QMainWindow):
         self._sync_active_time_control_indicator()
         self._sync_realtime_poll_interval()
         self._refresh_ponder_badge_idle()
+        self._warm_up_engine_async()
         if enabled:
             self._log(f"Đã áp dụng preset {name.title()}.")
         else:
             self._log("Đã trở về cấu hình Stockfish mạnh nhất mặc định.")
+
+    def _warm_up_engine_async(self) -> None:
+        if (
+            self._engine_warmup_thread is not None
+            and self._engine_warmup_thread.is_alive()
+        ):
+            return
+
+        def run() -> None:
+            try:
+                self.engine_manager.warm_up()
+            except Exception:
+                return
+
+        self._engine_warmup_thread = threading.Thread(
+            target=run,
+            daemon=True,
+            name="stockfish-warmup",
+        )
+        self._engine_warmup_thread.start()
 
     def _sync_active_time_control_indicator(self) -> None:
         active = str(self.config.get("analysis.active_time_control_preset", "")).upper()
@@ -1528,7 +1665,7 @@ class MainWindow(QMainWindow):
         active = str(
             self.config.get("analysis.active_time_control_preset", "")
         ).upper()
-        self._realtime_timer.setInterval(50 if active == "BULLET" else 150)
+        self._realtime_timer.setInterval(25 if active == "BULLET" else 150)
 
     def _refresh_profile_summary(self) -> None:
         if self.adaptive_time_checkbox.isChecked():
@@ -1756,6 +1893,7 @@ class MainWindow(QMainWindow):
             self.engine_manager.clear_cache()
             self._load_settings_into_controls()
             self._refresh_ponder_badge_idle()
+            self._warm_up_engine_async()
             self._log("Đã lưu cài đặt và áp dụng cho lần phân tích tiếp theo.")
 
     @Slot()
@@ -1838,6 +1976,7 @@ class MainWindow(QMainWindow):
         self.engine_manager.stop_ponder()
         self._realtime_enabled = False
         self._realtime_timer.stop()
+        self._web_overlay_dispatcher.stop()
         self._stop_thread(self._realtime_thread)
         self._realtime_thread = None
         self._realtime_worker = None
@@ -2085,6 +2224,7 @@ class MainWindow(QMainWindow):
 
     def _render_analysis_result(self, result: AnalysisResult, board_image: object | None = None) -> None:
         self._last_analysis_result = result
+        self._show_move_on_web_board_async(result)
         self.best_move_label.setText(self._describe_best_move(result))
         self.move_from_to_label.setText(self._from_to_text(result.best_move_uci))
         self.evaluation_label.setText(result.evaluation)
@@ -2113,7 +2253,6 @@ class MainWindow(QMainWindow):
             "ponder_miss_refined": "Kết quả tinh chỉnh sau ponder miss",
         }.get(result.source, result.source)
         self.details_label.setText(f"{source_text} · {result.thinking_time_ms} ms")
-        self._update_fen_status(result.fen, len(chess.Board(result.fen).piece_map()), result.source)
         if board_image is None:
             self.board_widget.set_position(result.fen, result.best_move_uci)
         else:
@@ -2121,8 +2260,6 @@ class MainWindow(QMainWindow):
         # Defer the web overlay update so that the board and labels paint
         # immediately.  The WebSocket round-trip (connect + 800-line JS script
         # + browser execution) takes 100–300 ms and must not block the UI.
-        QTimer.singleShot(0, lambda: self._show_move_on_web_board(result))
-
     def _clear_best_move_display(self) -> None:
         self.best_move_label.setText("Đang chờ nước mới...")
         self.move_from_to_label.setText("-")
@@ -2164,6 +2301,47 @@ class MainWindow(QMainWindow):
             "ponder_miss_refined": "kết quả tinh chỉnh sau ponder miss",
         }.get(source, source)
 
+    def _show_move_on_web_board_async(self, result: AnalysisResult) -> None:
+        if not self.web_overlay_button.isChecked():
+            return
+        try:
+            try:
+                human_index = self._human_candidate_index(
+                    chess.Board(result.fen), result.lines[:3]
+                )
+            except ValueError:
+                human_index = 1
+            moves = [
+                {
+                    "uci": line.move_uci,
+                    "label": line.move_san,
+                    "score": line.score,
+                    "rank": index,
+                    "color": self._candidate_color(index),
+                    "role": " · ".join(
+                        role
+                        for role, applies in (
+                            ("E", index == 1),
+                            ("T", index == human_index),
+                        )
+                        if applies
+                    ),
+                }
+                for index, line in enumerate(result.lines[:3], start=1)
+            ]
+            preferred_site = str(self.config.get("browser.preferred_site", "auto"))
+            target_id = self._browser_target_id
+            perspective = str(self.side_combo.currentData())
+        except Exception:
+            return
+
+        self._web_overlay_dispatcher.show(
+            moves,
+            perspective=perspective,
+            preferred_site=preferred_site,
+            target_id=target_id,
+        )
+
     def _show_move_on_web_board(self, result: AnalysisResult) -> None:
         if not self.web_overlay_button.isChecked():
             return
@@ -2201,6 +2379,20 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             return
+
+    def _bullet_fast_path(self) -> bool:
+        return str(
+            self.config.get("analysis.active_time_control_preset", "")
+        ).upper() == "BULLET"
+
+    def _clear_move_from_web_board_async(self) -> None:
+        preferred_site = str(self.config.get("browser.preferred_site", "auto"))
+        target_id = self._browser_target_id
+
+        self._web_overlay_dispatcher.clear(
+            preferred_site=preferred_site,
+            target_id=target_id,
+        )
 
     def _clear_move_from_web_board(self) -> None:
         try:

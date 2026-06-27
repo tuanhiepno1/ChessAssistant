@@ -30,6 +30,8 @@ class ProfileTests(unittest.TestCase):
             self.assertTrue(config.get("time_control_presets.BLITZ.ponder"))
             self.assertEqual(config.get("time_control_presets.BULLET.multipv"), 1)
             self.assertFalse(config.get("time_control_presets.BULLET.ponder"))
+            self.assertEqual(config.get("time_control_presets.BULLET.ponder_refinement_time_ms"), 0)
+            self.assertEqual(config.get("time_control_presets.BULLET.ponder_stop_timeout_ms"), 50)
 
     def test_edited_time_control_preset_is_saved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -80,12 +82,45 @@ class ProfileTests(unittest.TestCase):
 
             config.apply_time_control_preset("BULLET")
 
-            self.assertEqual(config.get("engine.threads"), 8)
+            self.assertEqual(config.get("engine.threads"), 2)
             self.assertEqual(config.get("engine.hash_mb"), 256)
             self.assertEqual(config.get("engine.multipv"), 1)
             self.assertFalse(config.get("engine.ponder"))
             self.assertFalse(config.get("analysis.adaptive_time_enabled"))
-            self.assertEqual(config.get("analysis.time_ms"), 150)
+            self.assertEqual(config.get("analysis.time_ms"), 40)
+            self.assertEqual(config.get("analysis.ponder_refinement_time_ms"), 0)
+            self.assertEqual(config.get("analysis.ponder_stop_timeout_ms"), 50)
+
+    def test_legacy_bullet_preset_gets_fast_defaults_for_missing_ponder_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(
+                json.dumps({
+                    "analysis": {"active_time_control_preset": "BULLET"},
+                    "time_control_presets": {
+                        "BULLET": {
+                            "threads": 4,
+                            "hash_mb": 256,
+                            "multipv": 1,
+                            "ponder": False,
+                            "adaptive_time_enabled": False,
+                            "time_ms": 150,
+                            "min_time_ms": 200,
+                            "probe_time_ms": 150,
+                            "realtime_max_time_ms": 200,
+                            "hard_max_time_ms": 400,
+                        }
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            config = ConfigManager(path)
+
+            self.assertEqual(config.get("engine.threads"), 4)
+            self.assertEqual(config.get("analysis.ponder_refinement_time_ms"), 0)
+            self.assertEqual(config.get("analysis.ponder_prediction_time_ms"), 0)
+            self.assertEqual(config.get("analysis.ponder_stop_timeout_ms"), 50)
 
     def test_bullet_skips_opening_book_entirely(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

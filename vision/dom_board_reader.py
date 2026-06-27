@@ -66,7 +66,10 @@ class DomBoardReader:
     # Thread-local persistent WebSocket.  Creating a new TCP connection per
     # read costs 10–80 ms; reusing one connection per thread eliminates that
     # overhead for every DOM read after the first in the same thread.
-    _ws_local = threading.local()
+    _shared_ws_conn: websocket.WebSocket | None = None
+    _shared_ws_conn_url: str | None = None
+    _shared_ws_lock = threading.Lock()
+    _shared_message_ids = itertools.count(1)
 
     def __init__(
         self,
@@ -78,6 +81,8 @@ class DomBoardReader:
         self.preferred_site = preferred_site.lower()
         self.target_id = target_id
         self._message_ids = itertools.count(1)
+        self._local_ws_conn: websocket.WebSocket | None = None
+        self._local_ws_conn_url: str | None = None
 
     @property
     def _cache_key(self) -> tuple[str, str, str]:
@@ -537,13 +542,254 @@ class DomBoardReader:
             status=status,
         )
 
+    def read_fast(self) -> DomBoardState:
+        page = self._get_page()
+        ws_url = self._get_ws_url(page)
+        if not ws_url:
+            raise DomReadError("KhÃ´ng tÃ¬m tháº¥y WebSocket DevTools cá»§a tháº» cá» vua.")
+
+        script = r"""
+(() => {
+  const pieceCode = (tokens) => {
+    const classes = tokens
+      .flatMap((name) => String(name || '').trim().toLowerCase().split(/[\s_-]+/))
+      .filter(Boolean);
+    const compact = classes.find((name) => /^[wb][prnbqk]$/.test(name));
+    if (compact) return compact;
+    const color = classes.includes('white') ? 'w' : (classes.includes('black') ? 'b' : '');
+    const names = { pawn: 'p', knight: 'n', bishop: 'b', rook: 'r', queen: 'q', king: 'k' };
+    const kind = Object.keys(names).find((name) => classes.includes(name));
+    return color && kind ? color + names[kind] : null;
+  };
+  const findBoard = () => {
+    const cached = window.__chessAssistantMainBoard;
+    if (cached && cached.isConnected && cached.ownerDocument === document) return cached;
+    const selector = location.hostname.includes('lichess.org')
+      ? 'main.round cg-board, main.analyse cg-board, main.study cg-board, cg-board'
+      : (location.hostname.includes('play.chessbase.com')
+        ? '#boardRoot0 canvas, .boardRoot canvas, .boardHolder canvas'
+        : 'wc-chess-board, chess-board, cg-board, .cg-wrap, .board, .chess-board, #board-single, [data-boardid], #boardRoot0 canvas, .boardRoot canvas, .boardHolder canvas');
+    const candidates = Array.from(document.querySelectorAll(selector))
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        const side = Math.min(rect.width, rect.height);
+        if (side < 140 || Math.abs(rect.width - rect.height) > side * 0.18 ||
+            style.display === 'none' || style.visibility === 'hidden') return null;
+        return {el, score: side * side + (el === cached ? 50000 : 0)};
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.score - a.score);
+    if (candidates.length) {
+      window.__chessAssistantMainBoard = candidates[0].el;
+      return candidates[0].el;
+    }
+    const piece = document.querySelector('.piece, [data-piece], cg-board piece');
+    let node = piece?.parentElement || null;
+    while (node && node !== document.body) {
+      const rect = node.getBoundingClientRect();
+      if (rect.width > 140 && Math.abs(rect.width - rect.height) < rect.width * 0.12) {
+        window.__chessAssistantMainBoard = node;
+        return node;
+      }
+      node = node.parentElement;
+    }
+    return null;
+  };
+  const boardEl = findBoard();
+  const boardRect = boardEl ? boardEl.getBoundingClientRect() : null;
+  const boardText = boardEl
+    ? [boardEl, boardEl.parentElement, boardEl.parentElement?.parentElement]
+        .filter(Boolean)
+        .map((el) => `${el.className || ''} ${el.getAttribute?.('data-orientation') || ''} ${el.getAttribute?.('orientation') || ''}`)
+        .join(' ')
+        .toLowerCase()
+    : '';
+  let blackAtBottom =
+    boardText.includes('flipped') ||
+    boardText.includes('orientation-black') ||
+    boardText.includes('orientation black') ||
+    (window.glApp && window.glApp.panelMgr && window.glApp.panelMgr.getKernel &&
+      window.glApp.panelMgr.getKernel()?.boardWin?.blackIsBottom === true);
+  const a1Anchor = boardEl?.querySelector?.('[data-square="a1"]');
+  if (a1Anchor && boardRect) {
+    const anchorRect = a1Anchor.getBoundingClientRect();
+    blackAtBottom =
+      anchorRect.left + anchorRect.width / 2 > boardRect.left + boardRect.width / 2 &&
+      anchorRect.top + anchorRect.height / 2 < boardRect.top + boardRect.height / 2;
+  }
+  const squareFromPoint = (x, y) => {
+    if (!boardRect || boardRect.width <= 0 || boardRect.height <= 0) return null;
+    const side = Math.min(boardRect.width, boardRect.height);
+    const left = boardRect.left + (boardRect.width - side) / 2;
+    const top = boardRect.top + (boardRect.height - side) / 2;
+    const cell = side / 8;
+    const col = Math.floor((x - left) / cell);
+    const row = Math.floor((y - top) / cell);
+    if (col < 0 || row < 0 || col > 7 || row > 7) return null;
+    if (blackAtBottom) return { file: 8 - col, rank: row + 1 };
+    return { file: col + 1, rank: 8 - row };
+  };
+  const chessComSource = boardEl
+    ? Array.from(boardEl.querySelectorAll('.piece'))
+    : Array.from(document.querySelectorAll('.piece'));
+  const chessComPieces = chessComSource.map((el) => {
+    const classes = Array.from(el.classList);
+    const piece = pieceCode(classes);
+    const square = classes.find((name) => /^square-\d\d$/.test(name));
+    if (!piece || !square) return null;
+    return { piece, file: Number(square.slice(7, 8)), rank: Number(square.slice(8, 9)) };
+  }).filter(Boolean);
+  const seenSquares = new Set();
+  const domPieces = boardEl ? Array.from(boardEl.querySelectorAll('piece, [data-piece]')) : [];
+  const pointPieces = domPieces.map((el) => {
+    const classes = Array.from(el.classList);
+    if (classes.some((name) => ['ghost', 'fading', 'exploding', 'anim'].includes(name))) return null;
+    const piece = pieceCode([el.getAttribute?.('data-piece'), ...classes]);
+    if (!piece) return null;
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    if (rect.width <= 4 || rect.height <= 4 || style.display === 'none' ||
+        style.visibility === 'hidden' || Number(style.opacity || '1') <= 0.05) return null;
+    const square = squareFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    if (!square) return null;
+    const key = `${square.file}${square.rank}`;
+    if (seenSquares.has(key)) return null;
+    seenSquares.add(key);
+    return { piece, file: square.file, rank: square.rank };
+  }).filter(Boolean);
+  let internalFen = null;
+  try {
+    internalFen = window.glApp?.panelMgr?.getKernel?.()?.game?.getCurPos?.()?.toFEN?.() || null;
+  } catch (err) {
+    internalFen = null;
+  }
+  const pieces = pointPieces.length ? pointPieces : chessComPieces;
+  let turnFromLastMove = null;
+  if (location.hostname.includes('lichess.org') && boardEl) {
+    const lastMoveSquares = Array.from((boardEl.parentElement || boardEl).querySelectorAll('square.last-move'))
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        return squareFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      })
+      .filter(Boolean);
+    const occupied = lastMoveSquares
+      .map((square) => pieces.find((piece) => piece.file === square.file && piece.rank === square.rank))
+      .filter(Boolean);
+    if (occupied.length === 1) {
+      turnFromLastMove = occupied[0].piece.startsWith('w') ? 'black' : 'white';
+    }
+  }
+  const activeClock = document.querySelector(
+    '.clock-player-turn, .clock-component.clock-player-turn, rclock.running, .rclock.running, ' +
+    '[data-testid*="clock"].running, [data-testid*="clock"].active, .clock.running, .clock.active'
+  );
+  let activeClockPosition = null;
+  if (activeClock && boardRect) {
+    const rect = activeClock.getBoundingClientRect();
+    activeClockPosition =
+      rect.top + rect.height / 2 > boardRect.top + boardRect.height / 2 ? 'bottom' : 'top';
+  }
+  return {
+    url: location.href,
+    title: document.title,
+    pieces,
+    moves: [],
+    activeClockPosition,
+    blackAtBottom,
+    internalFen,
+    turnFromFen: internalFen && /\s+b\s/.test(internalFen) ? 'black' : (internalFen && /\s+w\s/.test(internalFen) ? 'white' : null),
+    turnFromLastMove,
+    site: location.hostname.includes('lichess.org') ? 'lichess' : (location.hostname.includes('chess.com') ? 'chess.com' : (location.hostname.includes('play.chessbase.com') ? 'chessbase' : (location.hostname.includes('play.chessclub.com') ? 'chessclub' : 'unknown')))
+  };
+})()
+"""
+        payload = self._evaluate(ws_url, script)
+        pieces = []
+        occupied: set[int] = set()
+        for item in payload.get("pieces", []):
+            label = PIECE_CODES.get(str(item.get("piece", "")).lower())
+            if label is None:
+                continue
+            file_idx = int(item["file"]) - 1
+            rank_idx = int(item["rank"]) - 1
+            if 0 <= file_idx <= 7 and 0 <= rank_idx <= 7:
+                square = chess.square(file_idx, rank_idx)
+                if square in occupied:
+                    continue
+                occupied.add(square)
+                pieces.append(SquarePiece(square_index=square, label=label))
+        if not pieces:
+            raise DomReadError("DOM khÃ´ng tÃ¬m tháº¥y quÃ¢n cá» trong tháº» hiá»‡n táº¡i.")
+        if len(pieces) > 32:
+            raise DomReadError(f"DOM Ä‘á»c thá»«a {len(pieces)} quÃ¢n; bÃ n cá» Ä‘ang cÃ³ ghost/animation, chá» á»•n Ä‘á»‹nh.")
+        board_snapshot = chess.Board.empty()
+        symbols = {
+            "white_pawn": "P",
+            "white_knight": "N",
+            "white_bishop": "B",
+            "white_rook": "R",
+            "white_queen": "Q",
+            "white_king": "K",
+            "black_pawn": "p",
+            "black_knight": "n",
+            "black_bishop": "b",
+            "black_rook": "r",
+            "black_queen": "q",
+            "black_king": "k",
+        }
+        for piece in pieces:
+            symbol = symbols.get(piece.label)
+            if symbol:
+                board_snapshot.set_piece_at(piece.square_index, chess.Piece.from_symbol(symbol))
+        if board_snapshot.king(chess.WHITE) is None or board_snapshot.king(chess.BLACK) is None:
+            raise DomReadError("DOM chÆ°a Ä‘á»c Ä‘á»§ hai vua; bÃ n cá» cÃ³ thá»ƒ Ä‘ang render/chuyá»ƒn Ä‘á»™ng hoáº·c chÆ°a vÃ o vÃ¡n.")
+        active_clock = payload.get("activeClockPosition")
+        site = str(payload.get("site", "unknown"))
+        exact_fen = (
+            self._validated_internal_fen(payload.get("internalFen"), board_snapshot)
+            if site == "chessbase"
+            else None
+        )
+        if exact_fen:
+            exact_board = chess.Board(exact_fen)
+            turn = exact_board.turn
+            turn_reliable = True
+            turn_source = "FEN ná»™i bá»™ trang"
+        else:
+            turn, turn_reliable, turn_source = self._resolve_turn(payload, 0)
+        status = (
+            f"DOM nhanh Ä‘á»c {len(pieces)} quÃ¢n, "
+            f"lÆ°á»£t {'Tráº¯ng' if turn == chess.WHITE else 'Äen'} theo {turn_source}."
+        )
+        return DomBoardState(
+            pieces=pieces,
+            url=str(payload.get("url", page.get("url", ""))),
+            title=str(payload.get("title", "")),
+            turn=turn,
+            turn_reliable=turn_reliable,
+            turn_source=turn_source,
+            active_clock_position=str(active_clock) if active_clock in {"top", "bottom"} else None,
+            black_at_bottom=bool(payload.get("blackAtBottom", False)),
+            site=site,
+            exact_fen=exact_fen,
+            move_count=0,
+            status=status,
+        )
+
     def show_best_move(self, move_uci: str, perspective: str, label: str) -> None:
         self.show_moves(
             [{"uci": move_uci, "label": label, "score": "", "rank": 1, "color": "#4ade80"}],
             perspective,
         )
 
-    def show_moves(self, moves: list[dict[str, object]], perspective: str) -> None:
+    def show_moves(
+        self,
+        moves: list[dict[str, object]],
+        perspective: str,
+        *,
+        isolated_connection: bool = False,
+    ) -> None:
         valid_moves = [move for move in moves[:3] if len(str(move.get("uci", ""))) >= 4]
         if not valid_moves:
             return
@@ -559,9 +805,9 @@ class DomBoardReader:
             expression = self._chessbase_native_overlay_script(from_square, to_square)
         else:
             expression = self._moves_overlay_script(valid_moves, perspective)
-        self._evaluate(ws_url, expression)
+        self._evaluate(ws_url, expression, isolated_connection=isolated_connection)
 
-    def clear_best_move(self) -> None:
+    def clear_best_move(self, *, isolated_connection: bool = False) -> None:
         page = self._get_page()
         ws_url = self._get_ws_url(page)
         if not ws_url:
@@ -576,11 +822,20 @@ class DomBoardReader:
   return {ok: true};
 })()
 """
-        self._evaluate(ws_url, expression)
+        self._evaluate(ws_url, expression, isolated_connection=isolated_connection)
+
+    def close_local_connection(self) -> None:
+        if self._local_ws_conn is not None:
+            try:
+                self._local_ws_conn.close()
+            except Exception:
+                pass
+        self._local_ws_conn = None
+        self._local_ws_conn_url = None
 
     def _find_chess_page(self) -> dict:
         try:
-            with urlopen(f"{self.endpoint}/json", timeout=0.6) as response:
+            with urlopen(f"{self.endpoint}/json", timeout=0.25) as response:
                 pages = json.loads(response.read().decode("utf-8"))
         except Exception as exc:
             raise DomUnavailableError("Không kết nối được cổng DevTools 9222.") from exc
@@ -690,23 +945,113 @@ class DomBoardReader:
         Call after a WebSocket error that suggests the tab has been closed or
         navigated away.
         """
+        with cls._shared_ws_lock:
+            if cls._shared_ws_conn is not None:
+                try:
+                    cls._shared_ws_conn.close()
+                except Exception:
+                    pass
+            cls._shared_ws_conn = None
+            cls._shared_ws_conn_url = None
         cls._shared_page = None
         cls._shared_ws_url = None
         cls._shared_cache_key = None
 
-    def _evaluate(self, ws_url: str, expression: str) -> dict:
-        ws = getattr(DomBoardReader._ws_local, "conn", None)
-        if ws is None:
+    def _evaluate(
+        self,
+        ws_url: str,
+        expression: str,
+        *,
+        isolated_connection: bool = False,
+    ) -> dict:
+        if isolated_connection:
+            return self._evaluate_local(ws_url, expression)
+        if not DomBoardReader._shared_ws_lock.acquire(timeout=0.05):
+            raise DomReadError("DevTools đang bận; bỏ lượt đọc này để giữ Bullet tức thời.")
+        try:
+            ws = DomBoardReader._shared_ws_conn
+            if ws is None or DomBoardReader._shared_ws_conn_url != ws_url:
+                if ws is not None:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+                try:
+                    ws = websocket.create_connection(
+                        ws_url, timeout=0.25, suppress_origin=True
+                    )
+                    ws.settimeout(0.25)
+                    DomBoardReader._shared_ws_conn = ws
+                    DomBoardReader._shared_ws_conn_url = ws_url
+                except Exception as exc:
+                    DomBoardReader._shared_ws_conn = None
+                    DomBoardReader._shared_ws_conn_url = None
+                    DomBoardReader._shared_page = None
+                    DomBoardReader._shared_ws_url = None
+                    DomBoardReader._shared_cache_key = None
+                    raise DomReadError(
+                        f"Không kết nối được WebSocket DOM: {exc}"
+                    ) from exc
+
+            message_id = next(DomBoardReader._shared_message_ids)
+            try:
+                ws.send(
+                    json.dumps(
+                        {
+                            "id": message_id,
+                            "method": "Runtime.evaluate",
+                            "params": {
+                                "expression": expression,
+                                "returnByValue": True,
+                                "awaitPromise": False,
+                            },
+                        }
+                    )
+                )
+                while True:
+                    message = json.loads(ws.recv())
+                    if message.get("id") != message_id:
+                        continue
+                    result = message.get("result", {}).get("result", {})
+                    if "value" in result:
+                        return dict(result["value"])
+                    raise DomReadError("DevTools không trả về dữ liệu bàn cờ.")
+            except Exception:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+                DomBoardReader._shared_ws_conn = None
+                DomBoardReader._shared_ws_conn_url = None
+                DomBoardReader._shared_page = None
+                DomBoardReader._shared_ws_url = None
+                DomBoardReader._shared_cache_key = None
+                raise
+        finally:
+            DomBoardReader._shared_ws_lock.release()
+
+    def _evaluate_local(self, ws_url: str, expression: str) -> dict:
+        ws = self._local_ws_conn
+        if ws is None or self._local_ws_conn_url != ws_url:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
             try:
                 ws = websocket.create_connection(
-                    ws_url, timeout=0.8, suppress_origin=True
+                    ws_url, timeout=0.20, suppress_origin=True
                 )
-                ws.settimeout(2.0)
-                DomBoardReader._ws_local.conn = ws
+                ws.settimeout(0.20)
+                self._local_ws_conn = ws
+                self._local_ws_conn_url = ws_url
             except Exception as exc:
-                DomBoardReader._invalidate_page_cache()
+                self.close_local_connection()
+                DomBoardReader._shared_page = None
+                DomBoardReader._shared_ws_url = None
+                DomBoardReader._shared_cache_key = None
                 raise DomReadError(
-                    f"Không kết nối được WebSocket DOM: {exc}"
+                    f"KhÃ´ng káº¿t ná»‘i Ä‘Æ°á»£c WebSocket DOM: {exc}"
                 ) from exc
 
         message_id = next(self._message_ids)
@@ -731,15 +1076,12 @@ class DomBoardReader:
                 result = message.get("result", {}).get("result", {})
                 if "value" in result:
                     return dict(result["value"])
-                raise DomReadError("DevTools không trả về dữ liệu bàn cờ.")
+                raise DomReadError("DevTools khÃ´ng tráº£ vá» dá»¯ liá»‡u bÃ n cá».")
         except Exception:
-            # Connection broken — discard and let the next call reconnect.
-            try:
-                ws.close()
-            except Exception:
-                pass
-            DomBoardReader._ws_local.conn = None
-            DomBoardReader._invalidate_page_cache()
+            self.close_local_connection()
+            DomBoardReader._shared_page = None
+            DomBoardReader._shared_ws_url = None
+            DomBoardReader._shared_cache_key = None
             raise
 
     @staticmethod
